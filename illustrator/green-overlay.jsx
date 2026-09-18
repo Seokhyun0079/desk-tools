@@ -30,9 +30,11 @@
         var objectRows = [];
         var picked = {};
         var suppressObjectEvent = 0;
-        var lastObjectEventAt = 0;
-        var lastObjectEventId = -1;
-        var pendingFocusRef = null;
+        var inObjectListHandler = false;
+        var cachedZoom = 1;
+        try {
+            if (doc.views.length > 0) cachedZoom = doc.views[0].zoom;
+        } catch (_) {}
 
         function typeOf(item) {
             try { return item.typename; } catch (_) { return ""; }
@@ -544,6 +546,18 @@
             return null;
         }
 
+        function zOrderOf(item) {
+            try { return item.absoluteZOrderPosition; } catch (_) { return null; }
+        }
+
+        function currentZoom() {
+            try {
+                var view = activeView();
+                if (view && view.zoom) return view.zoom;
+            } catch (_) {}
+            return cachedZoom;
+        }
+
         function sendBridgeTalk(code) {
             var bt = new BridgeTalk();
             try {
@@ -555,79 +569,51 @@
             bt.send();
         }
 
-        function panScript(cx, cy, zoom) {
+        function panByZScript(z, typename, zoom) {
             return (
-                "try{" +
-                "if(app.documents.length){" +
-                "var d=app.activeDocument;" +
-                "var v=d.views[0];" +
-                "try{if(d.activeView)v=d.activeView;}catch(e0){}" +
-                "var cs=app.coordinateSystem;" +
+                "(function(){" +
+                "if(!app.documents.length)return;" +
+                "var doc=app.activeDocument;" +
+                "var wantZ=" + jsNumber(z) + ";" +
+                "var wantT='" + typename + "';" +
+                "var zoom=" + jsNumber(zoom) + ";" +
+                "var oldcs=app.coordinateSystem;" +
                 "app.coordinateSystem=CoordinateSystem.DOCUMENTCOORDINATESYSTEM;" +
-                "var z=" + jsNumber(zoom) + ";" +
-                "var p=[" + jsNumber(cx) + "," + jsNumber(cy) + "];" +
+                "function panTo(item){" +
+                "var b,v,p;" +
+                "try{b=item.visibleBounds;}catch(e0){b=item.geometricBounds;}" +
+                "p=[(b[0]+b[2])/2,(b[1]+b[3])/2];" +
+                "v=doc.views[0];" +
+                "try{if(doc.activeView)v=doc.activeView;}catch(e1){}" +
                 "v.centerPoint=p;" +
-                "v.zoom=z*1.001;" +
+                "v.zoom=zoom;" +
                 "v.centerPoint=p;" +
-                "v.zoom=z;" +
-                "v.centerPoint=p;" +
-                "try{app.coordinateSystem=cs;}catch(e1){}" +
                 "try{app.redraw();}catch(e2){}" +
-                "try{app.refresh();}catch(e3){}" +
                 "}" +
-                "}catch(e4){}"
+                "function match(item){" +
+                "try{return item.typename==wantT&&item.absoluteZOrderPosition==wantZ;}catch(e3){return false;}" +
+                "}" +
+                "var i,item;" +
+                "try{" +
+                "for(i=0;i<doc.pageItems.length;i++){" +
+                "item=doc.pageItems[i];" +
+                "if(match(item)){panTo(item);try{app.coordinateSystem=oldcs;}catch(e4){}return;}" +
+                "}" +
+                "}catch(e5){}" +
+                "try{" +
+                "for(i=0;i<doc.pathItems.length;i++){" +
+                "item=doc.pathItems[i];" +
+                "if(match(item)){panTo(item);try{app.coordinateSystem=oldcs;}catch(e6){}return;}" +
+                "}" +
+                "}catch(e7){}" +
+                "try{app.coordinateSystem=oldcs;}catch(e8){}" +
+                "})();"
             );
         }
 
-        function panViewTo(item) {
-            var b, view, zoom, p;
-            if (!item) return;
-
-            b = null;
-            withDocumentCoordinates(function () {
-                try { b = item.visibleBounds; } catch (_) {}
-                if (!b) b = item.geometricBounds;
-            });
-            if (!b) return;
-
-            zoom = 1;
-            try {
-                view = activeView();
-                if (view) zoom = view.zoom;
-            } catch (_) {}
-
-            p = [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2];
-
-            try {
-                withDocumentCoordinates(function () {
-                    view = activeView();
-                    if (!view) return;
-                    view.centerPoint = p;
-                    view.zoom = zoom * 1.001;
-                    view.centerPoint = p;
-                    view.zoom = zoom;
-                    view.centerPoint = p;
-                });
-            } catch (_) {}
-
-            sendBridgeTalk(panScript(p[0], p[1], zoom));
-        }
-
-        $.global.__greenOverlayFollowCanvas = function () {
-            try {
-                applyIllustratorSelection();
-                panViewTo(pendingFocusRef);
-                try { app.redraw(); } catch (_) {}
-                try { app.refresh(); } catch (_) {}
-            } catch (_) {}
-        };
-
-        function requestCanvasFollow(item) {
-            pendingFocusRef = item;
-            sendBridgeTalk(
-                '#targetengine "greenOverlayEngine"\n' +
-                "try{$.global.__greenOverlayFollowCanvas();}catch(e){}"
-            );
+        function requestCanvasFollow(entry) {
+            if (!entry || entry.zOrder === null || entry.zOrder === undefined) return;
+            sendBridgeTalk(panByZScript(entry.zOrder, entry.itemType, currentZoom()));
         }
 
         function addDestinationBranch(container, uiParent) {
@@ -643,13 +629,29 @@
                 if (destKids.length > 0) {
                     node = uiParent.add("node", label + "  [" + kindLabel(item) + "]");
                     node._destinationIndex = destinationRefs.length;
-                    destinationRefs.push(item);
+                    destinationRefs.push({
+                        ref: item,
+                        z: zOrderOf(item),
+                        type: typeOf(item),
+                        name: ""
+                    });
+                    try {
+                        destinationRefs[node._destinationIndex].name = String(item.name);
+                    } catch (_) {}
                     addDestinationBranch(item, node);
                     node.expanded = false;
                 } else {
                     node = uiParent.add("item", label + "  [" + kindLabel(item) + "]");
                     node._destinationIndex = destinationRefs.length;
-                    destinationRefs.push(item);
+                    destinationRefs.push({
+                        ref: item,
+                        z: zOrderOf(item),
+                        type: typeOf(item),
+                        name: ""
+                    });
+                    try {
+                        destinationRefs[node._destinationIndex].name = String(item.name);
+                    } catch (_) {}
                 }
             }
         }
@@ -669,7 +671,9 @@
                     selectable: false,
                     expanded: false,
                     children: [],
-                    label: labeledName(item, counts)
+                    label: labeledName(item, counts),
+                    zOrder: zOrderOf(item),
+                    itemType: typeOf(item)
                 };
                 objectEntries.push(entry);
 
@@ -764,32 +768,37 @@
 
         function handleObjectListEvent() {
             try {
-                var row, entry, now, i;
+                var row, entry, i;
 
-                if (suppressObjectEvent > 0) return;
+                if (suppressObjectEvent > 0 || inObjectListHandler) return;
+                inObjectListHandler = true;
 
                 row = objectList.selection;
-                if (row === null) return;
-
-                entry = objectRows[row.index];
-                if (!entry) return;
-
-                now = (new Date()).getTime();
-                if (entry.id === lastObjectEventId && now - lastObjectEventAt < 80) {
+                if (row === null) {
+                    inObjectListHandler = false;
                     return;
                 }
-                lastObjectEventId = entry.id;
-                lastObjectEventAt = now;
+
+                entry = objectRows[row.index];
+                if (!entry) {
+                    inObjectListHandler = false;
+                    return;
+                }
 
                 if (entry.selectable) {
                     picked[entry.id] = !picked[entry.id];
                     row.text = objectRowText(entry);
                     updateCountAndInfo(entry.ref);
-                    requestCanvasFollow(entry.ref);
+                    try { applyIllustratorSelection(); } catch (_) {}
+                    requestCanvasFollow(entry);
+                    inObjectListHandler = false;
                     return;
                 }
 
-                if (entry.children.length === 0) return;
+                if (entry.children.length === 0) {
+                    inObjectListHandler = false;
+                    return;
+                }
 
                 entry.expanded = !entry.expanded;
 
@@ -805,8 +814,10 @@
                 } catch (_) {
                 } finally {
                     suppressObjectEvent--;
+                    inObjectListHandler = false;
                 }
             } catch (e) {
+                inObjectListHandler = false;
                 showError(e);
             }
         }
@@ -826,8 +837,7 @@
                 }
 
                 refreshVisibleObjectRows();
-                pendingFocusRef = null;
-                requestCanvasFollow(null);
+                try { applyIllustratorSelection(); } catch (_) {}
                 updateCountAndInfo(null);
                 statusText.text = "すべて選択しました。";
             } catch (e) {
@@ -839,8 +849,7 @@
             try {
                 picked = {};
                 refreshVisibleObjectRows();
-                pendingFocusRef = null;
-                requestCanvasFollow(null);
+                try { doc.selection = null; } catch (_) {}
                 updateCountAndInfo(null);
                 statusText.text = "すべて解除しました。";
             } catch (e) {
@@ -856,67 +865,34 @@
                 .replace(/\n/g, "\\n");
         }
 
-        function collectOverlayJobs() {
-            var jobs = [];
-            var skipped = 0;
-
-            withDocumentCoordinates(function () {
-                var i, entry, b, width, height, top, left;
-
-                for (i = 0; i < objectEntries.length; i++) {
-                    entry = objectEntries[i];
-                    if (!entry.selectable || !picked[entry.id]) continue;
-
-                    b = null;
-                    try { b = entry.ref.geometricBounds; } catch (_) {}
-                    if (!b) {
-                        try { b = entry.ref.visibleBounds; } catch (__) {}
-                    }
-                    if (!b) {
-                        skipped++;
-                        continue;
-                    }
-
-                    width = Math.abs(b[2] - b[0]);
-                    height = Math.abs(b[1] - b[3]);
-                    if (width <= 0 || height <= 0) {
-                        skipped++;
-                        continue;
-                    }
-
-                    top = b[1] > b[3] ? b[1] : b[3];
-                    left = b[0] < b[2] ? b[0] : b[2];
-                    jobs.push({ t: top, l: left, w: width, h: height });
-                }
-            });
-
-            return { jobs: jobs, skipped: skipped };
-        }
-
-        function buildExecuteScript(destination) {
-            var collected = collectOverlayJobs();
-            var jobs = collected.jobs;
-            var i, parts, destType, destName, destZ;
-
-            if (jobs.length === 0) {
-                return "alert('対象の境界を取得できないため作成できません。');";
-            }
-
-            parts = [];
-            for (i = 0; i < jobs.length; i++) {
-                parts.push(
-                    "{t:" + jsNumber(jobs[i].t) +
-                    ",l:" + jsNumber(jobs[i].l) +
-                    ",w:" + jsNumber(jobs[i].w) +
-                    ",h:" + jsNumber(jobs[i].h) + "}"
+        function collectPickedKeys() {
+            var keys = [];
+            var i, entry;
+            for (i = 0; i < objectEntries.length; i++) {
+                entry = objectEntries[i];
+                if (!entry.selectable || !picked[entry.id]) continue;
+                if (entry.zOrder === null || entry.zOrder === undefined) continue;
+                keys.push(
+                    "{z:" + jsNumber(entry.zOrder) +
+                    ",t:\"" + entry.itemType + "\"}"
                 );
             }
+            return keys;
+        }
 
-            destType = typeOf(destination);
-            destName = "";
-            destZ = "null";
-            try { destName = jsString(destination.name); } catch (_) {}
-            try { destZ = jsNumber(destination.absoluteZOrderPosition); } catch (_) {}
+        function buildExecuteScript(destInfo) {
+            var keys = collectPickedKeys();
+            var destType, destName, destZ;
+
+            if (keys.length === 0) {
+                return "alert('対象オブジェクトを特定できません。');";
+            }
+
+            destType = destInfo.type || "Layer";
+            destName = jsString(destInfo.name || "");
+            destZ = destInfo.z === null || destInfo.z === undefined
+                ? "null"
+                : jsNumber(destInfo.z);
 
             return (
                 "(function(){" +
@@ -953,36 +929,56 @@
                 "}" +
                 "return doc.activeLayer;" +
                 "}" +
+                "function findItem(z,t){" +
+                "var i,item;" +
+                "try{" +
+                "for(i=0;i<doc.pageItems.length;i++){" +
+                "item=doc.pageItems[i];" +
+                "try{if(item.typename==t&&item.absoluteZOrderPosition==z)return item;}catch(e4){}" +
+                "}" +
+                "}catch(e5){}" +
+                "try{" +
+                "for(i=0;i<doc.pathItems.length;i++){" +
+                "item=doc.pathItems[i];" +
+                "try{if(item.absoluteZOrderPosition==z)return item;}catch(e6){}" +
+                "}" +
+                "}catch(e7){}" +
+                "return null;" +
+                "}" +
                 "var dest=findDest();" +
-                "var jobs=[" + parts.join(",") + "];" +
-                "var skipped=" + collected.skipped + ";" +
+                "var keys=[" + keys.join(",") + "];" +
                 "var color=null;" +
                 "try{" +
                 "if(doc.documentColorSpace===DocumentColorSpace.CMYK){" +
                 "color=new CMYKColor();color.cyan=75;color.magenta=0;color.yellow=80;color.black=0;" +
                 "}" +
-                "}catch(e4){}" +
+                "}catch(e8){}" +
                 "if(!color){color=new RGBColor();color.red=0;color.green=200;color.blue=70;}" +
-                "var made=[],failed=skipped,lastError='';" +
-                "var i,rect;" +
-                "for(i=0;i<jobs.length;i++){" +
+                "var made=[],failed=0,lastError='';" +
+                "var i,src,b,w,h,top,left,rect;" +
+                "for(i=0;i<keys.length;i++){" +
                 "try{" +
+                "src=findItem(keys[i].z,keys[i].t);" +
+                "if(!src){failed++;lastError='対象が見つかりません';continue;}" +
+                "try{b=src.geometricBounds;}catch(e9){b=src.visibleBounds;}" +
+                "w=Math.abs(b[2]-b[0]);h=Math.abs(b[1]-b[3]);" +
+                "if(w<=0||h<=0){failed++;continue;}" +
+                "top=b[1]>b[3]?b[1]:b[3];left=b[0]<b[2]?b[0]:b[2];" +
                 "rect=null;" +
-                "try{rect=dest.pathItems.rectangle(jobs[i].t,jobs[i].l,jobs[i].w,jobs[i].h);}" +
-                "catch(e5){" +
-                "rect=doc.pathItems.rectangle(jobs[i].t,jobs[i].l,jobs[i].w,jobs[i].h);" +
-                "try{rect.move(dest,ElementPlacement.PLACEATBEGINNING);}catch(e6){}" +
+                "try{rect=dest.pathItems.rectangle(top,left,w,h);}" +
+                "catch(e10){" +
+                "rect=doc.pathItems.rectangle(top,left,w,h);" +
+                "try{rect.move(dest,ElementPlacement.PLACEATBEGINNING);}catch(e11){}" +
                 "}" +
                 "rect.stroked=false;rect.filled=true;" +
-                "try{rect.fillColor=color;}catch(e7){}" +
+                "try{rect.fillColor=color;}catch(e12){}" +
                 "rect.name='グリーンオーバーレイ';" +
                 "made.push(rect);" +
-                "}catch(e8){failed++;lastError=String(e8);}" +
+                "}catch(e13){failed++;lastError=String(e13);}" +
                 "}" +
-                "try{app.coordinateSystem=oldcs;}catch(e9){}" +
-                "try{doc.selection=made;}catch(e10){}" +
-                "try{app.redraw();}catch(e11){}" +
-                "try{app.refresh();}catch(e12){}" +
+                "try{app.coordinateSystem=oldcs;}catch(e14){}" +
+                "try{doc.selection=made;}catch(e15){}" +
+                "try{app.redraw();}catch(e16){}" +
                 "if(failed>0){" +
                 "alert(made.length+'件を作成しました。\\n'+failed+'件は作成できませんでした。'+(lastError?'\\n\\n'+lastError:''));" +
                 "}else{" +
@@ -1001,15 +997,15 @@
                 }
 
                 var destinationIndex = destinationNode._destinationIndex;
-                var destination = destinationRefs[destinationIndex];
+                var destInfo = destinationRefs[destinationIndex];
 
-                if (!destination) {
+                if (!destInfo || !destInfo.ref) {
                     alert("作成先を取得できません。");
                     return;
                 }
 
                 try {
-                    if (destination.locked) {
+                    if (destInfo.ref.locked) {
                         alert("作成先がロックされています。");
                         return;
                     }
@@ -1029,7 +1025,7 @@
                     return;
                 }
 
-                sendBridgeTalk(buildExecuteScript(destination));
+                sendBridgeTalk(buildExecuteScript(destInfo));
                 statusText.text = "作成を実行しました。";
             } catch (e) {
                 showError(e);
@@ -1043,7 +1039,6 @@
         w.onClose = function () {
             try {
                 $.global.__greenOverlayWindow = null;
-                $.global.__greenOverlayFollowCanvas = null;
             } catch (_) {}
         };
 
