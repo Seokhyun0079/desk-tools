@@ -180,36 +180,173 @@
             return String(Math.round(n * 1000) / 1000);
         }
 
-        function directChildren(container) {
-            var result = [];
-            var i, child;
-            var t = typeOf(container);
+        function sameItem(a, b) {
+            if (!a || !b) return false;
+            try { if (a === b) return true; } catch (_) {}
+            try { if (a == b) return true; } catch (_) {}
+            try {
+                if (a.typename !== b.typename) return false;
+            } catch (_) {
+                return false;
+            }
+            try {
+                if (a.absoluteZOrderPosition === b.absoluteZOrderPosition) return true;
+            } catch (_) {}
+            return false;
+        }
+
+        function itemKey(item) {
+            try {
+                return item.typename + "#" + item.absoluteZOrderPosition;
+            } catch (_) {}
+            try {
+                return item.typename + "@" + item.zOrderPosition + ":" + item.name;
+            } catch (_) {}
+            return "";
+        }
+
+        function pushUnique(result, seen, item) {
+            var key = itemKey(item);
+            if (key) {
+                if (seen[key]) return;
+                seen[key] = true;
+            }
+            result.push(item);
+        }
+
+        function parentOf(item) {
+            try { return item.parent; } catch (_) { return null; }
+        }
+
+        function isDirectChild(item, container) {
+            var p = parentOf(item);
+            var clipped = false;
+            var pt;
+
+            if (!p) return false;
+            if (sameItem(p, container)) return true;
 
             try {
-                if (t === "Document") {
-                    for (i = 0; i < container.layers.length; i++) {
-                        result.push(container.layers[i]);
-                    }
-                } else if (t === "Layer") {
-                    for (i = 0; i < container.pageItems.length; i++) {
-                        child = container.pageItems[i];
-                        try {
-                            if (child.parent === container) result.push(child);
-                        } catch (_) {}
-                    }
-                    for (i = 0; i < container.layers.length; i++) {
-                        result.push(container.layers[i]);
-                    }
-                } else if (t === "GroupItem") {
-                    for (i = 0; i < container.pageItems.length; i++) {
-                        child = container.pageItems[i];
-                        try {
-                            if (child.parent === container) result.push(child);
-                        } catch (_) {}
+                clipped = typeOf(container) === "GroupItem" && container.clipped;
+            } catch (_) {}
+
+            if (!clipped) return false;
+
+            try {
+                pt = typeOf(p);
+                if (pt === "Layer" || pt === "Document") return true;
+            } catch (_) {}
+
+            return false;
+        }
+
+        function addCollectionItems(container, prop, result, seen, requireDirect) {
+            var col, i, item;
+            try {
+                col = container[prop];
+                if (!col) return;
+                for (i = 0; i < col.length; i++) {
+                    item = col[i];
+                    if (!requireDirect || isDirectChild(item, container)) {
+                        pushUnique(result, seen, item);
                     }
                 }
             } catch (_) {}
+        }
 
+        function addTypedChildren(container, result, seen, requireDirect) {
+            var props = [
+                "groupItems",
+                "compoundPathItems",
+                "pathItems",
+                "textFrames",
+                "placedItems",
+                "rasterItems",
+                "symbolItems",
+                "meshItems",
+                "pluginItems",
+                "graphItems",
+                "nonNativeItems",
+                "legacyTextItems"
+            ];
+            var i;
+            for (i = 0; i < props.length; i++) {
+                addCollectionItems(container, props[i], result, seen, requireDirect);
+            }
+        }
+
+        function sortByStack(items) {
+            items.sort(function (a, b) {
+                var za = 0;
+                var zb = 0;
+                try {
+                    za = a.absoluteZOrderPosition;
+                    zb = b.absoluteZOrderPosition;
+                    return zb - za;
+                } catch (_) {}
+                try {
+                    za = a.zOrderPosition;
+                    zb = b.zOrderPosition;
+                    return za - zb;
+                } catch (__) {}
+                return 0;
+            });
+        }
+
+        function artItemCount(items) {
+            var n = 0;
+            var i;
+            for (i = 0; i < items.length; i++) {
+                if (typeOf(items[i]) !== "Layer") n++;
+            }
+            return n;
+        }
+
+        function directChildren(container) {
+            var result = [];
+            var seen = {};
+            var i, t;
+
+            t = typeOf(container);
+
+            if (t === "Document") {
+                try {
+                    for (i = 0; i < container.layers.length; i++) {
+                        result.push(container.layers[i]);
+                    }
+                } catch (_) {}
+                return result;
+            }
+
+            if (t === "CompoundPathItem") {
+                addCollectionItems(container, "pathItems", result, seen, false);
+                return result;
+            }
+
+            if (t === "Layer") {
+                try {
+                    for (i = 0; i < container.layers.length; i++) {
+                        pushUnique(result, seen, container.layers[i]);
+                    }
+                } catch (_) {}
+            }
+
+            addCollectionItems(container, "pageItems", result, seen, true);
+
+            if (artItemCount(result) === 0) {
+                addTypedChildren(container, result, seen, true);
+            }
+
+            if (artItemCount(result) === 0) {
+                addCollectionItems(container, "groupItems", result, seen, false);
+                addCollectionItems(container, "compoundPathItems", result, seen, false);
+            }
+
+            if (artItemCount(result) === 0) {
+                addTypedChildren(container, result, seen, false);
+            }
+
+            sortByStack(result);
             return result;
         }
 
@@ -228,9 +365,9 @@
             return result;
         }
 
-        function isSelectableTarget(item) {
+        function isStructuralContainer(item) {
             var t = typeOf(item);
-            return t !== "Layer" && t !== "GroupItem";
+            return t === "Layer" || t === "GroupItem" || t === "CompoundPathItem";
         }
 
         function labeledName(item, counts) {
@@ -353,7 +490,7 @@
             var i, entry;
             for (i = 0; i < objectEntries.length; i++) {
                 entry = objectEntries[i];
-                if (entry.ref === item) return entry.label;
+                if (entry.ref === item || sameItem(entry.ref, item)) return entry.label;
             }
             return displayName(item, kindLabel(item));
         }
@@ -529,15 +666,19 @@
                     id: objectEntries.length,
                     ref: item,
                     depth: depth,
-                    selectable: isSelectableTarget(item),
+                    selectable: false,
                     expanded: false,
                     children: [],
                     label: labeledName(item, counts)
                 };
                 objectEntries.push(entry);
 
-                if (!entry.selectable) {
+                if (isStructuralContainer(item)) {
+                    entry.selectable = false;
                     entry.children = collectObjectBranch(item, depth + 1);
+                } else {
+                    entry.children = collectObjectBranch(item, depth + 1);
+                    entry.selectable = entry.children.length === 0;
                 }
 
                 nodes.push(entry);
