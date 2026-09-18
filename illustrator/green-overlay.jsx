@@ -33,7 +33,6 @@
         var lastObjectEventAt = 0;
         var lastObjectEventId = -1;
         var pendingFocusRef = null;
-        var pendingDestination = null;
 
         function typeOf(item) {
             try { return item.typename; } catch (_) { return ""; }
@@ -849,154 +848,149 @@
             }
         };
 
-        function errorText(e) {
-            var s = "";
-            try {
-                if (e && e.message) s = String(e.message);
-            } catch (_) {}
-            if (!s) {
-                try { s = String(e); } catch (__) { s = ""; }
-            }
-            try {
-                if (e && e.line) s += " (行 " + e.line + ")";
-            } catch (_) {}
-            return s;
+        function jsString(s) {
+            return String(s)
+                .replace(/\\/g, "\\\\")
+                .replace(/"/g, '\\"')
+                .replace(/\r/g, "\\r")
+                .replace(/\n/g, "\\n");
         }
 
-        function greenColor() {
-            try {
-                if (doc.documentColorSpace === DocumentColorSpace.CMYK) {
-                    var cmyk = new CMYKColor();
-                    cmyk.cyan = 75;
-                    cmyk.magenta = 0;
-                    cmyk.yellow = 80;
-                    cmyk.black = 0;
-                    return cmyk;
-                }
-            } catch (_) {}
-
-            var rgb = new RGBColor();
-            rgb.red = 0;
-            rgb.green = 200;
-            rgb.blue = 70;
-            return rgb;
-        }
-
-        function applyFill(rect, color) {
-            rect.stroked = false;
-            rect.filled = true;
-            try {
-                rect.fillColor = color;
-                return;
-            } catch (_) {}
-            try {
-                var rgb = new RGBColor();
-                rgb.red = 0;
-                rgb.green = 200;
-                rgb.blue = 70;
-                rect.fillColor = rgb;
-            } catch (__) {}
-        }
-
-        function createRectangleAt(destination, b) {
-            var width = Math.abs(b[2] - b[0]);
-            var height = Math.abs(b[1] - b[3]);
-            var top = b[1] > b[3] ? b[1] : b[3];
-            var left = b[0] < b[2] ? b[0] : b[2];
-            var rect = null;
-            var firstError = "";
-
-            if (width <= 0 || height <= 0) {
-                throw "サイズが0です";
-            }
-
-            try {
-                rect = destination.pathItems.rectangle(top, left, width, height);
-            } catch (e1) {
-                firstError = errorText(e1);
-                try {
-                    rect = doc.pathItems.rectangle(top, left, width, height);
-                    try {
-                        rect.move(destination, ElementPlacement.PLACEATBEGINNING);
-                    } catch (_) {}
-                } catch (e2) {
-                    throw firstError || errorText(e2);
-                }
-            }
-
-            return rect;
-        }
-
-        function createOverlays(destination) {
-            var made = [];
-            var failed = 0;
-            var lastError = "";
-            var color = greenColor();
+        function collectOverlayJobs() {
+            var jobs = [];
+            var skipped = 0;
 
             withDocumentCoordinates(function () {
-                var i, entry, b, rect;
+                var i, entry, b, width, height, top, left;
 
                 for (i = 0; i < objectEntries.length; i++) {
                     entry = objectEntries[i];
                     if (!entry.selectable || !picked[entry.id]) continue;
 
-                    try {
-                        b = null;
-                        try { b = entry.ref.geometricBounds; } catch (_) {}
-                        if (!b) {
-                            try { b = entry.ref.visibleBounds; } catch (__) {}
-                        }
-                        if (!b) throw "境界を取得できません";
-
-                        rect = createRectangleAt(destination, b);
-                        applyFill(rect, color);
-                        rect.name = "グリーンオーバーレイ";
-                        made.push(rect);
-                    } catch (e) {
-                        failed++;
-                        lastError = errorText(e) || lastError;
+                    b = null;
+                    try { b = entry.ref.geometricBounds; } catch (_) {}
+                    if (!b) {
+                        try { b = entry.ref.visibleBounds; } catch (__) {}
                     }
+                    if (!b) {
+                        skipped++;
+                        continue;
+                    }
+
+                    width = Math.abs(b[2] - b[0]);
+                    height = Math.abs(b[1] - b[3]);
+                    if (width <= 0 || height <= 0) {
+                        skipped++;
+                        continue;
+                    }
+
+                    top = b[1] > b[3] ? b[1] : b[3];
+                    left = b[0] < b[2] ? b[0] : b[2];
+                    jobs.push({ t: top, l: left, w: width, h: height });
                 }
             });
 
-            return { made: made, failed: failed, lastError: lastError };
+            return { jobs: jobs, skipped: skipped };
         }
 
-        function reportCreateResult(result) {
-            var madeN = result && result.made ? result.made.length : 0;
-            var failed = result ? result.failed : 0;
-            var msg;
+        function buildExecuteScript(destination) {
+            var collected = collectOverlayJobs();
+            var jobs = collected.jobs;
+            var i, parts, destType, destName, destZ;
 
-            if (!result) {
-                alert("作成に失敗しました。");
-                return;
+            if (jobs.length === 0) {
+                return "alert('対象の境界を取得できないため作成できません。');";
             }
 
-            try { doc.selection = result.made; } catch (_) {}
-            try { app.redraw(); } catch (_) {}
-            try { app.refresh(); } catch (_) {}
-
-            if (failed > 0) {
-                statusText.text = madeN + "件作成 / " + failed + "件失敗";
-                msg = madeN + "件を作成しました。\n" +
-                    failed + "件は作成できませんでした。";
-                if (result.lastError) msg += "\n\n" + result.lastError;
-                alert(msg);
-            } else {
-                statusText.text = madeN + "件を作成しました。";
-                alert(madeN + "件を作成しました。");
+            parts = [];
+            for (i = 0; i < jobs.length; i++) {
+                parts.push(
+                    "{t:" + jsNumber(jobs[i].t) +
+                    ",l:" + jsNumber(jobs[i].l) +
+                    ",w:" + jsNumber(jobs[i].w) +
+                    ",h:" + jsNumber(jobs[i].h) + "}"
+                );
             }
+
+            destType = typeOf(destination);
+            destName = "";
+            destZ = "null";
+            try { destName = jsString(destination.name); } catch (_) {}
+            try { destZ = jsNumber(destination.absoluteZOrderPosition); } catch (_) {}
+
+            return (
+                "(function(){" +
+                "if(!app.documents.length){alert('ドキュメントが開かれていません。');return;}" +
+                "var doc=app.activeDocument;" +
+                "var oldcs=app.coordinateSystem;" +
+                "app.coordinateSystem=CoordinateSystem.DOCUMENTCOORDINATESYSTEM;" +
+                "function walkLayers(parent,z,name){" +
+                "var i,lyr,found;" +
+                "if(!parent.layers)return null;" +
+                "for(i=0;i<parent.layers.length;i++){" +
+                "lyr=parent.layers[i];" +
+                "try{if(z!==null&&lyr.absoluteZOrderPosition==z)return lyr;}catch(e0){}" +
+                "try{if(name!==''&&lyr.name==name)return lyr;}catch(e1){}" +
+                "found=walkLayers(lyr,z,name);if(found)return found;" +
+                "}" +
+                "return null;" +
+                "}" +
+                "function findDest(){" +
+                "var wantType='" + destType + "';" +
+                "var wantZ=" + destZ + ";" +
+                "var wantName=\"" + destName + "\";" +
+                "var i,g;" +
+                "if(wantType=='Layer'){" +
+                "var L=walkLayers(doc,wantZ,wantName);if(L)return L;" +
+                "}" +
+                "if(wantType=='GroupItem'){" +
+                "try{" +
+                "for(i=0;i<doc.groupItems.length;i++){" +
+                "g=doc.groupItems[i];" +
+                "try{if(wantZ!==null&&g.absoluteZOrderPosition==wantZ)return g;}catch(e2){}" +
+                "}" +
+                "}catch(e3){}" +
+                "}" +
+                "return doc.activeLayer;" +
+                "}" +
+                "var dest=findDest();" +
+                "var jobs=[" + parts.join(",") + "];" +
+                "var skipped=" + collected.skipped + ";" +
+                "var color=null;" +
+                "try{" +
+                "if(doc.documentColorSpace===DocumentColorSpace.CMYK){" +
+                "color=new CMYKColor();color.cyan=75;color.magenta=0;color.yellow=80;color.black=0;" +
+                "}" +
+                "}catch(e4){}" +
+                "if(!color){color=new RGBColor();color.red=0;color.green=200;color.blue=70;}" +
+                "var made=[],failed=skipped,lastError='';" +
+                "var i,rect;" +
+                "for(i=0;i<jobs.length;i++){" +
+                "try{" +
+                "rect=null;" +
+                "try{rect=dest.pathItems.rectangle(jobs[i].t,jobs[i].l,jobs[i].w,jobs[i].h);}" +
+                "catch(e5){" +
+                "rect=doc.pathItems.rectangle(jobs[i].t,jobs[i].l,jobs[i].w,jobs[i].h);" +
+                "try{rect.move(dest,ElementPlacement.PLACEATBEGINNING);}catch(e6){}" +
+                "}" +
+                "rect.stroked=false;rect.filled=true;" +
+                "try{rect.fillColor=color;}catch(e7){}" +
+                "rect.name='グリーンオーバーレイ';" +
+                "made.push(rect);" +
+                "}catch(e8){failed++;lastError=String(e8);}" +
+                "}" +
+                "try{app.coordinateSystem=oldcs;}catch(e9){}" +
+                "try{doc.selection=made;}catch(e10){}" +
+                "try{app.redraw();}catch(e11){}" +
+                "try{app.refresh();}catch(e12){}" +
+                "if(failed>0){" +
+                "alert(made.length+'件を作成しました。\\n'+failed+'件は作成できませんでした。'+(lastError?'\\n\\n'+lastError:''));" +
+                "}else{" +
+                "alert(made.length+'件を作成しました。');" +
+                "}" +
+                "})();"
+            );
         }
-
-        $.global.__greenOverlayExecute = function () {
-            var result;
-            try {
-                result = createOverlays(pendingDestination);
-            } catch (e) {
-                result = { made: [], failed: 1, lastError: errorText(e) };
-            }
-            reportCreateResult(result);
-        };
 
         runButton.onClick = function () {
             try {
@@ -1035,13 +1029,8 @@
                     return;
                 }
 
-                pendingDestination = destination;
-
-                sendBridgeTalk(
-                    '#targetengine "greenOverlayEngine"\n' +
-                    "try{$.global.__greenOverlayExecute();}" +
-                    "catch(e){alert('作成に失敗しました。\\n'+e);}"
-                );
+                sendBridgeTalk(buildExecuteScript(destination));
+                statusText.text = "作成を実行しました。";
             } catch (e) {
                 showError(e);
             }
@@ -1055,7 +1044,6 @@
             try {
                 $.global.__greenOverlayWindow = null;
                 $.global.__greenOverlayFollowCanvas = null;
-                $.global.__greenOverlayExecute = null;
             } catch (_) {}
         };
 
