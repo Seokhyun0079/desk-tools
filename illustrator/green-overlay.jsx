@@ -18,6 +18,7 @@
 
         try {
             if ($.global.__greenOverlayWindow) {
+                $.global.__greenOverlayWindow.visible = false;
                 $.global.__greenOverlayWindow.close();
             }
         } catch (_) {}
@@ -31,18 +32,10 @@
         var suppressObjectEvent = 0;
         var lastObjectEventAt = 0;
         var lastObjectEventId = -1;
+        var pendingFocusRef = null;
 
         function typeOf(item) {
             try { return item.typename; } catch (_) { return ""; }
-        }
-
-        function nameOf(item) {
-            try {
-                if (item.name) return item.name;
-                return "<" + item.typename + ">";
-            } catch (_) {
-                return "<オブジェクト>";
-            }
         }
 
         function kindLabel(item) {
@@ -61,6 +54,95 @@
             return t || "オブジェクト";
         }
 
+        function cleanText(s) {
+            if (s === null || s === undefined) return "";
+            s = String(s);
+            s = s.replace(/\r\n/g, " ").replace(/\n/g, " ").replace(/\r/g, " ").replace(/\t/g, " ");
+            while (s.indexOf("  ") >= 0) s = s.replace("  ", " ");
+            return s.replace(/^ +/, "").replace(/ +$/, "");
+        }
+
+        function shorten(s, maxLen) {
+            if (!s) return "";
+            if (s.length <= maxLen) return s;
+            return s.substring(0, maxLen - 1) + "…";
+        }
+
+        function isUsefulName(name) {
+            name = cleanText(name);
+            if (!name) return false;
+            if (name.charAt(0) === "<" && name.charAt(name.length - 1) === ">") return false;
+            return true;
+        }
+
+        function fileNameOf(item) {
+            try {
+                if (item.file && item.file.name) return item.file.name;
+            } catch (_) {}
+            return "";
+        }
+
+        function swatchNameOf(item) {
+            try {
+                if (!item.filled) return "";
+                var c = item.fillColor;
+                if (!c) return "";
+                if (c.typename === "SpotColor" && c.spot && c.spot.name) return c.spot.name;
+                if (c.typename === "PatternColor" && c.pattern && c.pattern.name) return c.pattern.name;
+                if (c.typename === "GradientColor" && c.gradient && c.gradient.name) return c.gradient.name;
+            } catch (_) {}
+            return "";
+        }
+
+        function displayName(item, fallback) {
+            var t = typeOf(item);
+            var n = "";
+            var extra;
+
+            try { n = item.name; } catch (_) {}
+            if (isUsefulName(n)) return cleanText(n);
+
+            try {
+                if (isUsefulName(item.note)) return shorten(cleanText(item.note), 32);
+            } catch (_) {}
+
+            if (t === "TextFrame") {
+                try {
+                    extra = cleanText(item.contents);
+                    if (extra) return shorten(extra, 32);
+                } catch (_) {}
+            }
+
+            if (t === "PlacedItem" || t === "RasterItem") {
+                extra = fileNameOf(item);
+                if (extra) return extra;
+            }
+
+            if (t === "SymbolItem") {
+                try {
+                    if (item.symbol && isUsefulName(item.symbol.name)) {
+                        return item.symbol.name;
+                    }
+                } catch (_) {}
+            }
+
+            if (t === "GroupItem") {
+                try {
+                    if (item.clipped) return "クリップグループ";
+                } catch (_) {}
+            }
+
+            if (t === "PathItem") {
+                try {
+                    if (item.clipping) return "クリッピングパス";
+                } catch (_) {}
+                extra = swatchNameOf(item);
+                if (extra) return extra;
+            }
+
+            return fallback;
+        }
+
         function withDocumentCoordinates(fn) {
             var oldSystem = app.coordinateSystem;
             try {
@@ -73,7 +155,8 @@
 
         function boundsOf(item) {
             return withDocumentCoordinates(function () {
-                var b = item.geometricBounds;
+                var b;
+                try { b = item.visibleBounds; } catch (_) { b = item.geometricBounds; }
                 return {
                     left: b[0],
                     top: b[1],
@@ -90,6 +173,11 @@
             var i;
             for (i = 0; i < depth; i++) s += "    ";
             return s;
+        }
+
+        function jsNumber(n) {
+            if (isNaN(n)) return "0";
+            return String(Math.round(n * 1000) / 1000);
         }
 
         function directChildren(container) {
@@ -145,6 +233,13 @@
             return t !== "Layer" && t !== "GroupItem";
         }
 
+        function labeledName(item, counts) {
+            var kind = kindLabel(item);
+            if (!counts[kind]) counts[kind] = 0;
+            counts[kind]++;
+            return displayName(item, kind + " " + counts[kind]);
+        }
+
         function objectRowText(entry) {
             var marker;
             var check = "";
@@ -160,7 +255,7 @@
             }
 
             return indentText(entry.depth) + marker + check +
-                nameOf(entry.ref) + "  [" + kindLabel(entry.ref) + "]";
+                entry.label + "  [" + kindLabel(entry.ref) + "]";
         }
 
         var w = new Window(
@@ -233,7 +328,7 @@
         bottom.orientation = "row";
         bottom.alignment = ["fill", "bottom"];
 
-        var statusText = bottom.add("statictext", undefined, "読み込み中…");
+        var statusText = bottom.add("statictext", undefined, "準備完了");
         statusText.alignment = ["fill", "center"];
 
         var runButton = bottom.add("button", undefined, "確認 / 実行");
@@ -254,6 +349,15 @@
                 destinationTree.selection !== null;
         }
 
+        function labelOfItem(item) {
+            var i, entry;
+            for (i = 0; i < objectEntries.length; i++) {
+                entry = objectEntries[i];
+                if (entry.ref === item) return entry.label;
+            }
+            return displayName(item, kindLabel(item));
+        }
+
         function updateCountAndInfo(clickedItem) {
             var count = selectedCount();
             countText.text = count + "件選択";
@@ -262,7 +366,7 @@
                 try {
                     var b = boundsOf(clickedItem);
                     infoText.text =
-                        "名前: " + nameOf(clickedItem) +
+                        "名前: " + labelOfItem(clickedItem) +
                         "\n種類: " + kindLabel(clickedItem) +
                         " / サイズ: " +
                         b.width.toFixed(2) + " × " +
@@ -293,8 +397,6 @@
                     entry.ref.selected = true;
                 } catch (_) {}
             }
-
-            try { app.redraw(); } catch (_) {}
         }
 
         function activeView() {
@@ -305,51 +407,110 @@
             return null;
         }
 
-        function focusItem(item) {
+        function sendBridgeTalk(code) {
+            var bt = new BridgeTalk();
+            try {
+                bt.target = BridgeTalk.appSpecifier || "illustrator";
+            } catch (_) {
+                bt.target = "illustrator";
+            }
+            bt.body = code;
+            bt.send();
+        }
+
+        function panScript(cx, cy, zoom) {
+            return (
+                "try{" +
+                "if(app.documents.length){" +
+                "var d=app.activeDocument;" +
+                "var v=d.views[0];" +
+                "try{if(d.activeView)v=d.activeView;}catch(e0){}" +
+                "var cs=app.coordinateSystem;" +
+                "app.coordinateSystem=CoordinateSystem.DOCUMENTCOORDINATESYSTEM;" +
+                "var z=" + jsNumber(zoom) + ";" +
+                "var p=[" + jsNumber(cx) + "," + jsNumber(cy) + "];" +
+                "v.centerPoint=p;" +
+                "v.zoom=z*1.001;" +
+                "v.centerPoint=p;" +
+                "v.zoom=z;" +
+                "v.centerPoint=p;" +
+                "try{app.coordinateSystem=cs;}catch(e1){}" +
+                "try{app.redraw();}catch(e2){}" +
+                "try{app.refresh();}catch(e3){}" +
+                "}" +
+                "}catch(e4){}"
+            );
+        }
+
+        function panViewTo(item) {
+            var b, view, zoom, p;
+            if (!item) return;
+
+            b = null;
+            withDocumentCoordinates(function () {
+                try { b = item.visibleBounds; } catch (_) {}
+                if (!b) b = item.geometricBounds;
+            });
+            if (!b) return;
+
+            zoom = 1;
+            try {
+                view = activeView();
+                if (view) zoom = view.zoom;
+            } catch (_) {}
+
+            p = [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2];
+
             try {
                 withDocumentCoordinates(function () {
-                    var b = item.geometricBounds;
-                    var centerX = (b[0] + b[2]) / 2;
-                    var centerY = (b[1] + b[3]) / 2;
-                    var view = activeView();
-                    var oldZoom;
-
+                    view = activeView();
                     if (!view) return;
-
-                    oldZoom = view.zoom;
-                    view.centerPoint = [centerX, centerY];
-                    view.zoom = oldZoom;
-                    view.centerPoint = [centerX, centerY];
+                    view.centerPoint = p;
+                    view.zoom = zoom * 1.001;
+                    view.centerPoint = p;
+                    view.zoom = zoom;
+                    view.centerPoint = p;
                 });
+            } catch (_) {}
 
-                app.redraw();
-            } catch (e) {
-                statusText.text = "表示位置を移動できませんでした。";
-            }
+            sendBridgeTalk(panScript(p[0], p[1], zoom));
+        }
+
+        $.global.__greenOverlayFollowCanvas = function () {
+            try {
+                applyIllustratorSelection();
+                panViewTo(pendingFocusRef);
+                try { app.redraw(); } catch (_) {}
+                try { app.refresh(); } catch (_) {}
+            } catch (_) {}
+        };
+
+        function requestCanvasFollow(item) {
+            pendingFocusRef = item;
+            sendBridgeTalk(
+                '#targetengine "greenOverlayEngine"\n' +
+                "try{$.global.__greenOverlayFollowCanvas();}catch(e){}"
+            );
         }
 
         function addDestinationBranch(container, uiParent) {
             var children = destinationChildren(container);
-            var i, item, node, destKids;
+            var i, item, node, destKids, counts, label;
 
+            counts = {};
             for (i = 0; i < children.length; i++) {
                 item = children[i];
                 destKids = destinationChildren(item);
+                label = labeledName(item, counts);
 
                 if (destKids.length > 0) {
-                    node = uiParent.add(
-                        "node",
-                        nameOf(item) + "  [" + kindLabel(item) + "]"
-                    );
+                    node = uiParent.add("node", label + "  [" + kindLabel(item) + "]");
                     node._destinationIndex = destinationRefs.length;
                     destinationRefs.push(item);
                     addDestinationBranch(item, node);
                     node.expanded = false;
                 } else {
-                    node = uiParent.add(
-                        "item",
-                        nameOf(item) + "  [" + kindLabel(item) + "]"
-                    );
+                    node = uiParent.add("item", label + "  [" + kindLabel(item) + "]");
                     node._destinationIndex = destinationRefs.length;
                     destinationRefs.push(item);
                 }
@@ -359,8 +520,9 @@
         function collectObjectBranch(container, depth) {
             var children = directChildren(container);
             var nodes = [];
-            var i, item, entry;
+            var i, item, entry, counts;
 
+            counts = {};
             for (i = 0; i < children.length; i++) {
                 item = children[i];
                 entry = {
@@ -369,7 +531,8 @@
                     depth: depth,
                     selectable: isSelectableTarget(item),
                     expanded: false,
-                    children: []
+                    children: [],
+                    label: labeledName(item, counts)
                 };
                 objectEntries.push(entry);
 
@@ -427,9 +590,6 @@
         }
 
         function rebuildTrees() {
-            statusText.text = "読み込み中…";
-            w.update();
-
             destinationRefs = [];
             objectEntries = [];
             objectRoots = [];
@@ -447,7 +607,6 @@
             statusText.text = "準備完了";
 
             updateRunState();
-            w.update();
         }
 
         destinationTree.onChange = function () {
@@ -484,9 +643,8 @@
                 if (entry.selectable) {
                     picked[entry.id] = !picked[entry.id];
                     row.text = objectRowText(entry);
-                    applyIllustratorSelection();
-                    focusItem(entry.ref);
                     updateCountAndInfo(entry.ref);
+                    requestCanvasFollow(entry.ref);
                     return;
                 }
 
@@ -527,7 +685,8 @@
                 }
 
                 refreshVisibleObjectRows();
-                applyIllustratorSelection();
+                pendingFocusRef = null;
+                requestCanvasFollow(null);
                 updateCountAndInfo(null);
                 statusText.text = "すべて選択しました。";
             } catch (e) {
@@ -539,10 +698,8 @@
             try {
                 picked = {};
                 refreshVisibleObjectRows();
-
-                try { doc.selection = null; } catch (_) {}
-                try { app.redraw(); } catch (_) {}
-
+                pendingFocusRef = null;
+                requestCanvasFollow(null);
                 updateCountAndInfo(null);
                 statusText.text = "すべて解除しました。";
             } catch (e) {
@@ -630,6 +787,7 @@
 
                 try { doc.selection = made; } catch (_) {}
                 try { app.redraw(); } catch (_) {}
+                try { app.refresh(); } catch (_) {}
 
                 if (failed > 0) {
                     statusText.text =
@@ -656,12 +814,13 @@
         w.onClose = function () {
             try {
                 $.global.__greenOverlayWindow = null;
+                $.global.__greenOverlayFollowCanvas = null;
             } catch (_) {}
         };
 
-        w.show();
-        w.update();
         rebuildTrees();
+        try { w.layout.layout(true); } catch (_) {}
+        w.show();
 
     } catch (e) {
         showError(e);
