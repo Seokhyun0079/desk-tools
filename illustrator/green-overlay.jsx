@@ -25,7 +25,12 @@
         var doc = app.activeDocument;
         var destinationRefs = [];
         var objectEntries = [];
+        var objectRoots = [];
+        var objectRows = [];
         var picked = {};
+        var suppressObjectEvent = 0;
+        var lastObjectEventAt = 0;
+        var lastObjectEventId = -1;
 
         function typeOf(item) {
             try { return item.typename; } catch (_) { return ""; }
@@ -80,6 +85,13 @@
             });
         }
 
+        function indentText(depth) {
+            var s = "";
+            var i;
+            for (i = 0; i < depth; i++) s += "    ";
+            return s;
+        }
+
         function directChildren(container) {
             var result = [];
             var i, child;
@@ -107,21 +119,10 @@
                             if (child.parent === container) result.push(child);
                         } catch (_) {}
                     }
-                } else if (t === "CompoundPathItem") {
-                    for (i = 0; i < container.pathItems.length; i++) {
-                        child = container.pathItems[i];
-                        try {
-                            if (child.parent === container) result.push(child);
-                        } catch (_) {}
-                    }
                 }
             } catch (_) {}
 
             return result;
-        }
-
-        function hasChildren(item) {
-            return directChildren(item).length > 0;
         }
 
         function isDestination(item) {
@@ -129,20 +130,37 @@
             return t === "Layer" || t === "GroupItem";
         }
 
-        function isSelectableTarget(item) {
-            var t = typeOf(item);
-            return t !== "Layer" &&
-                   t !== "GroupItem" &&
-                   t !== "CompoundPathItem";
+        function destinationChildren(container) {
+            var result = [];
+            var children = directChildren(container);
+            var i;
+            for (i = 0; i < children.length; i++) {
+                if (isDestination(children[i])) result.push(children[i]);
+            }
+            return result;
         }
 
-        function objectText(entry) {
-            var item = entry.ref;
-            if (entry.selectable) {
-                return (picked[entry.id] ? "[x] " : "[ ] ") +
-                    nameOf(item) + "  [" + kindLabel(item) + "]";
+        function isSelectableTarget(item) {
+            var t = typeOf(item);
+            return t !== "Layer" && t !== "GroupItem";
+        }
+
+        function objectRowText(entry) {
+            var marker;
+            var check = "";
+
+            if (entry.children.length > 0) {
+                marker = entry.expanded ? "▼ " : "▶ ";
+            } else {
+                marker = "  ";
             }
-            return nameOf(item) + "  [" + kindLabel(item) + "]";
+
+            if (entry.selectable) {
+                check = picked[entry.id] ? "[x] " : "[ ] ";
+            }
+
+            return indentText(entry.depth) + marker + check +
+                nameOf(entry.ref) + "  [" + kindLabel(entry.ref) + "]";
         }
 
         var w = new Window(
@@ -186,8 +204,17 @@
         var countText = toolbar.add("statictext", undefined, "0件選択");
         countText.characters = 16;
 
-        var objectTree = objectPanel.add("treeview", undefined, []);
-        objectTree.preferredSize = [480, 330];
+        /*
+          TreeView は onClick が来ない。ネイティブ複数選択は Ctrl/Cmd 必須。
+          クリック・トグルは ListBox で扱い、階層の開閉は行テキストで表現する。
+        */
+        var objectList = objectPanel.add(
+            "listbox",
+            undefined,
+            [],
+            { multiselect: false }
+        );
+        objectList.preferredSize = [480, 330];
 
         var infoPanel = w.add("panel", undefined, "選択情報");
         infoPanel.orientation = "column";
@@ -270,16 +297,29 @@
             try { app.redraw(); } catch (_) {}
         }
 
+        function activeView() {
+            try {
+                if (doc.activeView) return doc.activeView;
+            } catch (_) {}
+            if (doc.views.length > 0) return doc.views[0];
+            return null;
+        }
+
         function focusItem(item) {
             try {
                 withDocumentCoordinates(function () {
                     var b = item.geometricBounds;
                     var centerX = (b[0] + b[2]) / 2;
                     var centerY = (b[1] + b[3]) / 2;
+                    var view = activeView();
+                    var oldZoom;
 
-                    if (doc.views.length > 0) {
-                        doc.views[0].centerPoint = [centerX, centerY];
-                    }
+                    if (!view) return;
+
+                    oldZoom = view.zoom;
+                    view.centerPoint = [centerX, centerY];
+                    view.zoom = oldZoom;
+                    view.centerPoint = [centerX, centerY];
                 });
 
                 app.redraw();
@@ -289,64 +329,99 @@
         }
 
         function addDestinationBranch(container, uiParent) {
-            var children = directChildren(container);
-            var i, item, node;
+            var children = destinationChildren(container);
+            var i, item, node, destKids;
 
             for (i = 0; i < children.length; i++) {
                 item = children[i];
+                destKids = destinationChildren(item);
 
-                if (!isDestination(item)) continue;
-
-                node = uiParent.add(
-                    "node",
-                    nameOf(item) + "  [" + kindLabel(item) + "]"
-                );
-                node._destinationIndex = destinationRefs.length;
-                destinationRefs.push(item);
-                node.expanded = false;
-
-                addDestinationBranch(item, node);
+                if (destKids.length > 0) {
+                    node = uiParent.add(
+                        "node",
+                        nameOf(item) + "  [" + kindLabel(item) + "]"
+                    );
+                    node._destinationIndex = destinationRefs.length;
+                    destinationRefs.push(item);
+                    addDestinationBranch(item, node);
+                    node.expanded = false;
+                } else {
+                    node = uiParent.add(
+                        "item",
+                        nameOf(item) + "  [" + kindLabel(item) + "]"
+                    );
+                    node._destinationIndex = destinationRefs.length;
+                    destinationRefs.push(item);
+                }
             }
         }
 
-        function addObjectBranch(container, uiParent) {
+        function collectObjectBranch(container, depth) {
             var children = directChildren(container);
-            var i, item, childList, node, entry;
+            var nodes = [];
+            var i, item, entry;
 
             for (i = 0; i < children.length; i++) {
                 item = children[i];
-                childList = directChildren(item);
-
                 entry = {
                     id: objectEntries.length,
                     ref: item,
+                    depth: depth,
                     selectable: isSelectableTarget(item),
-                    ui: null
+                    expanded: false,
+                    children: []
                 };
                 objectEntries.push(entry);
 
-                if (childList.length > 0) {
-                    node = uiParent.add("node", objectText(entry));
-                    node.expanded = false;
-                } else {
-                    node = uiParent.add("item", objectText(entry));
+                if (!entry.selectable) {
+                    entry.children = collectObjectBranch(item, depth + 1);
                 }
 
-                node._entryId = entry.id;
-                entry.ui = node;
+                nodes.push(entry);
+            }
 
-                if (childList.length > 0) {
-                    addObjectBranch(item, node);
+            return nodes;
+        }
+
+        function appendVisibleEntries(nodes, out) {
+            var i, entry;
+            for (i = 0; i < nodes.length; i++) {
+                entry = nodes[i];
+                out.push(entry);
+                if (entry.expanded && entry.children.length > 0) {
+                    appendVisibleEntries(entry.children, out);
                 }
             }
         }
 
-        function refreshSelectionMarkers() {
+        function paintObjectList() {
+            var visible = [];
+            var i, entry, row;
+
+            appendVisibleEntries(objectRoots, visible);
+
+            suppressObjectEvent++;
+            try {
+                objectList.removeAll();
+                objectRows = [];
+
+                for (i = 0; i < visible.length; i++) {
+                    entry = visible[i];
+                    row = objectList.add("item", objectRowText(entry));
+                    objectRows[row.index] = entry;
+                    entry.ui = row;
+                }
+            } finally {
+                suppressObjectEvent--;
+            }
+        }
+
+        function refreshVisibleObjectRows() {
             var i, entry;
-            for (i = 0; i < objectEntries.length; i++) {
-                entry = objectEntries[i];
+            for (i = 0; i < objectRows.length; i++) {
+                entry = objectRows[i];
                 try {
-                    entry.ui.text = objectText(entry);
+                    if (entry.ui) entry.ui.text = objectRowText(entry);
                 } catch (_) {}
             }
         }
@@ -357,13 +432,15 @@
 
             destinationRefs = [];
             objectEntries = [];
+            objectRoots = [];
+            objectRows = [];
             picked = {};
 
             destinationTree.removeAll();
-            objectTree.removeAll();
-
             addDestinationBranch(doc, destinationTree);
-            addObjectBranch(doc, objectTree);
+
+            objectRoots = collectObjectBranch(doc, 0);
+            paintObjectList();
 
             countText.text = "0件選択";
             infoText.text = "オブジェクトを選択してください。";
@@ -385,36 +462,58 @@
             }
         };
 
-        objectTree.onClick = function () {
+        function handleObjectListEvent() {
             try {
-                var clicked = objectTree.selection;
-                if (clicked === null) return;
+                var row, entry, now, i;
 
-                var entryId = clicked._entryId;
-                var entry =
-                    (entryId === undefined || entryId === null)
-                        ? null
-                        : objectEntries[entryId];
+                if (suppressObjectEvent > 0) return;
 
-                if (entry && entry.selectable) {
+                row = objectList.selection;
+                if (row === null) return;
+
+                entry = objectRows[row.index];
+                if (!entry) return;
+
+                now = (new Date()).getTime();
+                if (entry.id === lastObjectEventId && now - lastObjectEventAt < 80) {
+                    return;
+                }
+                lastObjectEventId = entry.id;
+                lastObjectEventAt = now;
+
+                if (entry.selectable) {
                     picked[entry.id] = !picked[entry.id];
-                    clicked.text = objectText(entry);
-
+                    row.text = objectRowText(entry);
                     applyIllustratorSelection();
                     focusItem(entry.ref);
                     updateCountAndInfo(entry.ref);
+                    return;
                 }
 
-                /*
-                  TreeView 자체의 selection은 단일 선택이므로
-                  체크 상태와 혼동되지 않도록 클릭 처리가 끝난 뒤 해제한다.
-                  복수 선택 상태는 picked에만 보존된다.
-                */
-                objectTree.selection = null;
+                if (entry.children.length === 0) return;
+
+                entry.expanded = !entry.expanded;
+
+                suppressObjectEvent++;
+                try {
+                    paintObjectList();
+                    for (i = 0; i < objectRows.length; i++) {
+                        if (objectRows[i].id === entry.id) {
+                            objectList.selection = i;
+                            break;
+                        }
+                    }
+                } catch (_) {
+                } finally {
+                    suppressObjectEvent--;
+                }
             } catch (e) {
                 showError(e);
             }
-        };
+        }
+
+        objectList.onClick = handleObjectListEvent;
+        objectList.onChange = handleObjectListEvent;
 
         selectAllButton.onClick = function () {
             try {
@@ -427,7 +526,7 @@
                     }
                 }
 
-                refreshSelectionMarkers();
+                refreshVisibleObjectRows();
                 applyIllustratorSelection();
                 updateCountAndInfo(null);
                 statusText.text = "すべて選択しました。";
@@ -439,7 +538,7 @@
         clearButton.onClick = function () {
             try {
                 picked = {};
-                refreshSelectionMarkers();
+                refreshVisibleObjectRows();
 
                 try { doc.selection = null; } catch (_) {}
                 try { app.redraw(); } catch (_) {}
@@ -468,8 +567,7 @@
                 }
 
                 var destinationIndex = destinationNode._destinationIndex;
-                var destination =
-                    destinationRefs[destinationIndex];
+                var destination = destinationRefs[destinationIndex];
 
                 if (!destination) {
                     alert("作成先を取得できません。");
@@ -495,21 +593,17 @@
                 var i, entry;
 
                 withDocumentCoordinates(function () {
-                    var b, rect;
+                    var b, rect, width, height;
 
                     for (i = 0; i < objectEntries.length; i++) {
                         entry = objectEntries[i];
 
-                        if (!entry.selectable ||
-                            !picked[entry.id]) {
-                            continue;
-                        }
+                        if (!entry.selectable || !picked[entry.id]) continue;
 
                         try {
                             b = entry.ref.geometricBounds;
-
-                            var width = Math.abs(b[2] - b[0]);
-                            var height = Math.abs(b[1] - b[3]);
+                            width = Math.abs(b[2] - b[0]);
+                            height = Math.abs(b[1] - b[3]);
 
                             if (width <= 0 || height <= 0) {
                                 failed++;
@@ -565,10 +659,6 @@
             } catch (_) {}
         };
 
-        /*
-          먼저 패널을 보이고, 그 뒤 계층을 읽는다.
-          큰 문서에서도 "아무것도 안 뜨는" 상태를 피한다.
-        */
         w.show();
         w.update();
         rebuildTrees();
