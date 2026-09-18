@@ -1,101 +1,463 @@
-﻿#target illustrator
+#target illustrator
+#targetengine "greenOverlayEngine"
+
 (function () {
-    if (!app.documents.length) { alert("ドキュメントが開かれていません。"); return; }
-    var doc=app.activeDocument, refs=[], destRefs=[], picked={};
-
-    function nameOf(x){try{return x.name||("<"+x.typename+">");}catch(e){return "<オブジェクト>";}}
-    function typeOf(x){try{return x.typename;}catch(e){return "";}}
-    function kids(x){
-        var a=[],i,it,t=typeOf(x);
-        try{
-            if(t==="Document"){for(i=0;i<x.layers.length;i++)a.push(x.layers[i]);}
-            else if(t==="Layer"){
-                for(i=0;i<x.pageItems.length;i++){it=x.pageItems[i];try{if(it.parent===x)a.push(it);}catch(e){}}
-                for(i=0;i<x.layers.length;i++)a.push(x.layers[i]);
-            } else if(t==="GroupItem"){
-                for(i=0;i<x.pageItems.length;i++){it=x.pageItems[i];try{if(it.parent===x)a.push(it);}catch(e2){}}
-            }
-        }catch(e3){}
-        return a;
+    function showError(e) {
+        var line = "";
+        try { if (e.line) line = "\n行: " + e.line; } catch (_) {}
+        alert("スクリプトエラー\n" + e + line);
     }
-    function bounds(x){var b=x.geometricBounds;return {l:b[0],t:b[1],w:Math.abs(b[2]-b[0]),h:Math.abs(b[1]-b[3])};}
 
-    var w=new Window("dialog","グリーンオーバーレイ");
-    w.orientation="column"; w.alignChildren=["fill","top"]; w.margins=10;
-    w.add("statictext",undefined,"対象と同じ位置・サイズに緑色の矩形を作成します。");
-
-    var dp=w.add("panel",undefined,"作成先"); dp.alignChildren=["fill","fill"];
-    var dt=dp.add("treeview",undefined,[]); dt.preferredSize=[440,140];
-
-    var op=w.add("panel",undefined,"対象オブジェクト"); op.alignChildren=["fill","fill"];
-    var bg=op.add("group");
-    var allBtn=bg.add("button",undefined,"全選択");
-    var noneBtn=bg.add("button",undefined,"全解除");
-    var count=bg.add("statictext",undefined,"0件選択"); count.characters=12;
-    var ot=op.add("treeview",undefined,[],{multiselect:true}); ot.preferredSize=[440,300];
-
-    var info=w.add("statictext",undefined,"オブジェクトを選択してください。",{multiline:true});
-    info.preferredSize=[440,42];
-    var run=w.add("button",undefined,"確認 / 実行"); run.enabled=false;
-
-    function addDest(x,p){
-        var a=kids(x),i,n,t;
-        for(i=0;i<a.length;i++){t=typeOf(a[i]); if(t==="Layer"||t==="GroupItem"){
-            n=p.add("node",nameOf(a[i])+" ["+(t==="Layer"?"レイヤー":"グループ")+"]");
-            n._i=destRefs.length; destRefs.push(a[i]); addDest(a[i],n);
-        }}
-    }
-    function addObj(x,p){
-        var a=kids(x),i,n,t;
-        for(i=0;i<a.length;i++){t=typeOf(a[i]);
-            n=p.add("node",nameOf(a[i])+" ["+t+"]"); n._i=refs.length;
-            n._ok=(t!=="Layer"&&t!=="GroupItem"); refs.push(a[i]); addObj(a[i],n);
+    try {
+        if (!app.documents.length) {
+            alert("ドキュメントが開かれていません。");
+            return;
         }
-    }
-    function nodes(p,out){out=out||[];for(var i=0;i<p.items.length;i++){var n=p.items[i];if(n._ok)out.push(n);if(n.items&&n.items.length)nodes(n,out);}return out;}
-    function setTreeSelection(){
-        var a=nodes(ot,[]),s=[]; for(var i=0;i<a.length;i++)if(picked[a[i]._i])s.push(a[i]);
-        try{ot.selection=s;}catch(e){}
-    }
-    function sync(){
-        var a=nodes(ot,[]),sel=[],i,n;
-        for(i=0;i<a.length;i++){n=a[i];if(picked[n._i])sel.push(refs[n._i]);}
-        try{doc.selection=null;doc.selection=sel;}catch(e){}
-        count.text=sel.length+"件選択"; run.enabled=sel.length>0&&!!dt.selection;
-        if(sel.length===1){var b=bounds(sel[0]);info.text="名前: "+nameOf(sel[0])+"\nサイズ: "+b.w.toFixed(2)+" × "+b.h.toFixed(2)+" pt";}
-        else info.text=sel.length?sel.length+"件のオブジェクトを選択中":"オブジェクトを選択してください。";
-        app.redraw();
-    }
 
-    /* 일반 클릭을 누적 토글 선택으로 사용 */
-    ot.onClick=function(){
-        var s=ot.selection, a=(s instanceof Array)?s:(s?[s]:[]);
-        if(!a.length)return;
-        var n=a[a.length-1];
-        if(n._ok){if(picked[n._i])delete picked[n._i];else picked[n._i]=true;}
-        setTreeSelection(); sync();
-    };
-    dt.onChange=function(){run.enabled=Object.keys?false:run.enabled; sync();};
-    allBtn.onClick=function(){var a=nodes(ot,[]);picked={};for(var i=0;i<a.length;i++)picked[a[i]._i]=true;setTreeSelection();sync();};
-    noneBtn.onClick=function(){picked={};try{ot.selection=null;}catch(e){}sync();};
+        try {
+            if ($.global.__greenOverlayWindow) {
+                $.global.__greenOverlayWindow.close();
+            }
+        } catch (_) {}
 
-    function green(){var c=new RGBColor();c.red=0;c.green=200;c.blue=70;return c;}
-    run.onClick=function(){
-        if(!dt.selection)return;
-        var dest=destRefs[dt.selection._i], a=nodes(ot,[]), chosen=[],i;
-        for(i=0;i<a.length;i++)if(picked[a[i]._i])chosen.push(refs[a[i]._i]);
-        if(!chosen.length)return;
-        if(!confirm(chosen.length+"件のオブジェクト上に緑色の要素を作成します。\n実行しますか？"))return;
-        var made=[],b,r;
-        for(i=0;i<chosen.length;i++){try{
-            b=bounds(chosen[i]); if(b.w<=0||b.h<=0)continue;
-            r=dest.pathItems.rectangle(b.t,b.l,b.w,b.h);r.stroked=false;r.filled=true;r.fillColor=green();r.name="グリーンオーバーレイ";made.push(r);
-        }catch(e){}}
-        try{doc.selection=made;}catch(e2){} app.redraw(); alert(made.length+"件を作成しました。");
-    };
+        var doc = app.activeDocument;
+        var objectRefs = [];
+        var objectRows = [];
+        var destinationRefs = [];
+        var picked = {};
 
-    addDest(doc,dt); addObj(doc,ot);
-    for(var i=0;i<dt.items.length;i++)dt.items[i].expanded=true;
-    for(i=0;i<ot.items.length;i++)ot.items[i].expanded=true;
-    w.center(); w.show();
+        function typeOf(item) {
+            try { return item.typename; } catch (e) { return ""; }
+        }
+
+        function nameOf(item) {
+            try {
+                if (item.name) return item.name;
+                return "<" + item.typename + ">";
+            } catch (e) {
+                return "<オブジェクト>";
+            }
+        }
+
+        function kindLabel(item) {
+            var t = typeOf(item);
+            if (t === "Layer") return "レイヤー";
+            if (t === "GroupItem") return "グループ";
+            if (t === "PathItem") return "パス";
+            if (t === "CompoundPathItem") return "複合パス";
+            if (t === "TextFrame") return "テキスト";
+            if (t === "PlacedItem") return "配置画像";
+            if (t === "RasterItem") return "画像";
+            if (t === "SymbolItem") return "シンボル";
+            if (t === "MeshItem") return "メッシュ";
+            return t || "オブジェクト";
+        }
+
+        function directChildren(container) {
+            var result = [];
+            var i, item;
+            var t = typeOf(container);
+
+            try {
+                if (t === "Document") {
+                    for (i = 0; i < container.layers.length; i++) {
+                        result.push(container.layers[i]);
+                    }
+                } else if (t === "Layer") {
+                    for (i = 0; i < container.pageItems.length; i++) {
+                        item = container.pageItems[i];
+                        try {
+                            if (item.parent === container) result.push(item);
+                        } catch (_) {}
+                    }
+                    for (i = 0; i < container.layers.length; i++) {
+                        result.push(container.layers[i]);
+                    }
+                } else if (t === "GroupItem") {
+                    for (i = 0; i < container.pageItems.length; i++) {
+                        item = container.pageItems[i];
+                        try {
+                            if (item.parent === container) result.push(item);
+                        } catch (_) {}
+                    }
+                }
+            } catch (_) {}
+
+            return result;
+        }
+
+        function boundsOf(item) {
+            var b = item.geometricBounds;
+            return {
+                left: b[0],
+                top: b[1],
+                right: b[2],
+                bottom: b[3],
+                width: Math.abs(b[2] - b[0]),
+                height: Math.abs(b[1] - b[3])
+            };
+        }
+
+        function indent(depth) {
+            var s = "";
+            for (var i = 0; i < depth; i++) s += "    ";
+            return s;
+        }
+
+        function isTargetable(item) {
+            var t = typeOf(item);
+            return t !== "Layer" && t !== "GroupItem";
+        }
+
+        var w = new Window("palette", "グリーンオーバーレイ", undefined, { resizeable: true });
+        $.global.__greenOverlayWindow = w;
+
+        w.orientation = "column";
+        w.alignChildren = ["fill", "top"];
+        w.spacing = 8;
+        w.margins = 10;
+
+        var intro = w.add("statictext", undefined, "対象と同じ位置・サイズに緑色の矩形を作成します。");
+        intro.characters = 52;
+
+        var destinationPanel = w.add("panel", undefined, "作成先");
+        destinationPanel.orientation = "column";
+        destinationPanel.alignChildren = ["fill", "fill"];
+        destinationPanel.margins = 8;
+
+        var destinationList = destinationPanel.add("listbox", undefined, [], { multiselect: false });
+        destinationList.preferredSize = [460, 150];
+
+        var objectPanel = w.add("panel", undefined, "対象オブジェクト");
+        objectPanel.orientation = "column";
+        objectPanel.alignChildren = ["fill", "fill"];
+        objectPanel.margins = 8;
+
+        var toolbar = objectPanel.add("group");
+        toolbar.orientation = "row";
+
+        var selectAllButton = toolbar.add("button", undefined, "全選択");
+        var clearButton = toolbar.add("button", undefined, "全解除");
+        var countText = toolbar.add("statictext", undefined, "0件選択");
+        countText.characters = 15;
+
+        var objectList = objectPanel.add("listbox", undefined, [], { multiselect: false });
+        objectList.preferredSize = [460, 320];
+
+        var infoPanel = w.add("panel", undefined, "選択情報");
+        infoPanel.orientation = "column";
+        infoPanel.alignChildren = ["fill", "top"];
+        infoPanel.margins = 8;
+
+        var infoText = infoPanel.add("statictext", undefined, "オブジェクトを選択してください。", { multiline: true });
+        infoText.preferredSize = [460, 54];
+
+        var bottom = w.add("group");
+        bottom.orientation = "row";
+        bottom.alignment = ["fill", "bottom"];
+
+        var statusText = bottom.add("statictext", undefined, "読み込み中…");
+        statusText.alignment = ["fill", "center"];
+
+        var runButton = bottom.add("button", undefined, "確認 / 実行");
+        runButton.enabled = false;
+
+        function selectedCount() {
+            var count = 0;
+            var i;
+            for (i = 0; i < objectRefs.length; i++) {
+                if (picked[i]) count++;
+            }
+            return count;
+        }
+
+        function updateRunState() {
+            runButton.enabled = selectedCount() > 0 && destinationList.selection !== null;
+        }
+
+        function rowText(meta) {
+            if (meta.targetable) {
+                return indent(meta.depth) + (picked[meta.refIndex] ? "[x] " : "[ ] ") +
+                    nameOf(objectRefs[meta.refIndex]) + "  [" + kindLabel(objectRefs[meta.refIndex]) + "]";
+            }
+            return indent(meta.depth) + nameOf(objectRefs[meta.refIndex]) +
+                "  [" + kindLabel(objectRefs[meta.refIndex]) + "]";
+        }
+
+        function refreshObjectRowTexts() {
+            var i;
+            for (i = 0; i < objectRows.length; i++) {
+                objectRows[i].listItem.text = rowText(objectRows[i]);
+            }
+        }
+
+        function applyIllustratorSelection() {
+            var i, item;
+            try { doc.selection = null; } catch (_) {}
+
+            for (i = 0; i < objectRefs.length; i++) {
+                if (!picked[i]) continue;
+                item = objectRefs[i];
+                try { item.selected = true; } catch (_) {}
+            }
+
+            app.redraw();
+        }
+
+        function focusItem(item) {
+            try {
+                var b = boundsOf(item);
+                var centerX = (b.left + b.right) / 2;
+                var centerY = (b.top + b.bottom) / 2;
+                if (doc.views.length > 0) {
+                    var view = doc.views[0];
+                    var oldZoom = view.zoom;
+                    view.centerPoint = [centerX, centerY];
+                    view.zoom = oldZoom;
+                }
+                app.redraw();
+            } catch (_) {}
+        }
+
+        function updateInfo(item) {
+            var count = selectedCount();
+
+            if (!item) {
+                infoText.text = count > 0 ? count + "件のオブジェクトを選択中" : "オブジェクトを選択してください。";
+                return;
+            }
+
+            try {
+                var b = boundsOf(item);
+                infoText.text =
+                    "名前: " + nameOf(item) +
+                    "\n種類: " + kindLabel(item) +
+                    " / サイズ: " + b.width.toFixed(2) + " × " + b.height.toFixed(2) + " pt" +
+                    " / 選択中: " + count + "件";
+            } catch (_) {
+                infoText.text = count + "件のオブジェクトを選択中";
+            }
+        }
+
+        function addDestinationRows(container, depth) {
+            var children = directChildren(container);
+            var i, item, t, row;
+
+            for (i = 0; i < children.length; i++) {
+                item = children[i];
+                t = typeOf(item);
+
+                if (t === "Layer" || t === "GroupItem") {
+                    row = destinationList.add(
+                        "item",
+                        indent(depth) + nameOf(item) + "  [" + kindLabel(item) + "]"
+                    );
+                    destinationRefs[row.index] = item;
+                    addDestinationRows(item, depth + 1);
+                }
+            }
+        }
+
+        function addObjectRows(container, depth) {
+            var children = directChildren(container);
+            var i, item, row, refIndex, meta;
+
+            for (i = 0; i < children.length; i++) {
+                item = children[i];
+                refIndex = objectRefs.length;
+                objectRefs.push(item);
+
+                meta = {
+                    refIndex: refIndex,
+                    depth: depth,
+                    targetable: isTargetable(item),
+                    listItem: null
+                };
+
+                row = objectList.add("item", "");
+                meta.listItem = row;
+                objectRows[row.index] = meta;
+                row.text = rowText(meta);
+
+                addObjectRows(item, depth + 1);
+            }
+        }
+
+        function rebuildLists() {
+            statusText.text = "読み込み中…";
+            w.update();
+
+            objectRefs = [];
+            objectRows = [];
+            destinationRefs = [];
+            picked = {};
+
+            destinationList.removeAll();
+            objectList.removeAll();
+
+            addDestinationRows(doc, 0);
+            addObjectRows(doc, 0);
+
+            countText.text = "0件選択";
+            infoText.text = "オブジェクトを選択してください。";
+            statusText.text = "準備完了";
+            updateRunState();
+            w.update();
+        }
+
+        destinationList.onChange = function () {
+            try {
+                if (destinationList.selection !== null) {
+                    statusText.text = "作成先: " + destinationList.selection.text;
+                }
+                updateRunState();
+            } catch (e) {
+                showError(e);
+            }
+        };
+
+        objectList.onClick = function () {
+            try {
+                var row = objectList.selection;
+                if (row === null) return;
+
+                var meta = objectRows[row.index];
+                if (!meta || !meta.targetable) return;
+
+                if (picked[meta.refIndex]) {
+                    picked[meta.refIndex] = false;
+                } else {
+                    picked[meta.refIndex] = true;
+                }
+
+                row.text = rowText(meta);
+                countText.text = selectedCount() + "件選択";
+
+                var clickedItem = objectRefs[meta.refIndex];
+                applyIllustratorSelection();
+                focusItem(clickedItem);
+                updateInfo(clickedItem);
+                updateRunState();
+            } catch (e) {
+                showError(e);
+            }
+        };
+
+        selectAllButton.onClick = function () {
+            try {
+                var i;
+                for (i = 0; i < objectRefs.length; i++) {
+                    if (isTargetable(objectRefs[i])) picked[i] = true;
+                }
+                refreshObjectRowTexts();
+                countText.text = selectedCount() + "件選択";
+                applyIllustratorSelection();
+                updateInfo(null);
+                updateRunState();
+            } catch (e) {
+                showError(e);
+            }
+        };
+
+        clearButton.onClick = function () {
+            try {
+                picked = {};
+                refreshObjectRowTexts();
+                countText.text = "0件選択";
+                try { doc.selection = null; } catch (_) {}
+                app.redraw();
+                updateInfo(null);
+                updateRunState();
+            } catch (e) {
+                showError(e);
+            }
+        };
+
+        function greenColor() {
+            var color = new RGBColor();
+            color.red = 0;
+            color.green = 200;
+            color.blue = 70;
+            return color;
+        }
+
+        runButton.onClick = function () {
+            try {
+                if (destinationList.selection === null) return;
+
+                var destination = destinationRefs[destinationList.selection.index];
+                if (!destination) {
+                    alert("作成先を取得できません。");
+                    return;
+                }
+
+                var count = selectedCount();
+                if (!count) return;
+
+                if (!confirm(count + "件のオブジェクト上に緑色の要素を作成します。\n実行しますか？")) {
+                    return;
+                }
+
+                var made = [];
+                var failed = 0;
+                var i, source, b, rect;
+
+                for (i = 0; i < objectRefs.length; i++) {
+                    if (!picked[i]) continue;
+
+                    source = objectRefs[i];
+
+                    try {
+                        b = boundsOf(source);
+                        if (b.width <= 0 || b.height <= 0) {
+                            failed++;
+                            continue;
+                        }
+
+                        rect = destination.pathItems.rectangle(
+                            b.top,
+                            b.left,
+                            b.width,
+                            b.height
+                        );
+                        rect.stroked = false;
+                        rect.filled = true;
+                        rect.fillColor = greenColor();
+                        rect.name = "グリーンオーバーレイ";
+                        made.push(rect);
+                    } catch (_) {
+                        failed++;
+                    }
+                }
+
+                try { doc.selection = made; } catch (_) {}
+                app.redraw();
+
+                if (failed > 0) {
+                    statusText.text = made.length + "件作成 / " + failed + "件失敗";
+                    alert(made.length + "件を作成しました。\n" + failed + "件は作成できませんでした。");
+                } else {
+                    statusText.text = made.length + "件を作成しました。";
+                    alert(made.length + "件を作成しました。");
+                }
+            } catch (e) {
+                showError(e);
+            }
+        };
+
+        w.onResizing = w.onResize = function () {
+            this.layout.resize();
+        };
+
+        w.onClose = function () {
+            try { $.global.__greenOverlayWindow = null; } catch (_) {}
+        };
+
+        w.show();
+        w.update();
+        rebuildLists();
+
+    } catch (e) {
+        showError(e);
+    }
 }());
