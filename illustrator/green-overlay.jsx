@@ -33,6 +33,7 @@
         var lastObjectEventAt = 0;
         var lastObjectEventId = -1;
         var pendingFocusRef = null;
+        var pendingDestination = null;
 
         function typeOf(item) {
             try { return item.typename; } catch (_) { return ""; }
@@ -848,13 +849,154 @@
             }
         };
 
-        function greenColor() {
-            var color = new RGBColor();
-            color.red = 0;
-            color.green = 200;
-            color.blue = 70;
-            return color;
+        function errorText(e) {
+            var s = "";
+            try {
+                if (e && e.message) s = String(e.message);
+            } catch (_) {}
+            if (!s) {
+                try { s = String(e); } catch (__) { s = ""; }
+            }
+            try {
+                if (e && e.line) s += " (行 " + e.line + ")";
+            } catch (_) {}
+            return s;
         }
+
+        function greenColor() {
+            try {
+                if (doc.documentColorSpace === DocumentColorSpace.CMYK) {
+                    var cmyk = new CMYKColor();
+                    cmyk.cyan = 75;
+                    cmyk.magenta = 0;
+                    cmyk.yellow = 80;
+                    cmyk.black = 0;
+                    return cmyk;
+                }
+            } catch (_) {}
+
+            var rgb = new RGBColor();
+            rgb.red = 0;
+            rgb.green = 200;
+            rgb.blue = 70;
+            return rgb;
+        }
+
+        function applyFill(rect, color) {
+            rect.stroked = false;
+            rect.filled = true;
+            try {
+                rect.fillColor = color;
+                return;
+            } catch (_) {}
+            try {
+                var rgb = new RGBColor();
+                rgb.red = 0;
+                rgb.green = 200;
+                rgb.blue = 70;
+                rect.fillColor = rgb;
+            } catch (__) {}
+        }
+
+        function createRectangleAt(destination, b) {
+            var width = Math.abs(b[2] - b[0]);
+            var height = Math.abs(b[1] - b[3]);
+            var top = b[1] > b[3] ? b[1] : b[3];
+            var left = b[0] < b[2] ? b[0] : b[2];
+            var rect = null;
+            var firstError = "";
+
+            if (width <= 0 || height <= 0) {
+                throw "サイズが0です";
+            }
+
+            try {
+                rect = destination.pathItems.rectangle(top, left, width, height);
+            } catch (e1) {
+                firstError = errorText(e1);
+                try {
+                    rect = doc.pathItems.rectangle(top, left, width, height);
+                    try {
+                        rect.move(destination, ElementPlacement.PLACEATBEGINNING);
+                    } catch (_) {}
+                } catch (e2) {
+                    throw firstError || errorText(e2);
+                }
+            }
+
+            return rect;
+        }
+
+        function createOverlays(destination) {
+            var made = [];
+            var failed = 0;
+            var lastError = "";
+            var color = greenColor();
+
+            withDocumentCoordinates(function () {
+                var i, entry, b, rect;
+
+                for (i = 0; i < objectEntries.length; i++) {
+                    entry = objectEntries[i];
+                    if (!entry.selectable || !picked[entry.id]) continue;
+
+                    try {
+                        b = null;
+                        try { b = entry.ref.geometricBounds; } catch (_) {}
+                        if (!b) {
+                            try { b = entry.ref.visibleBounds; } catch (__) {}
+                        }
+                        if (!b) throw "境界を取得できません";
+
+                        rect = createRectangleAt(destination, b);
+                        applyFill(rect, color);
+                        rect.name = "グリーンオーバーレイ";
+                        made.push(rect);
+                    } catch (e) {
+                        failed++;
+                        lastError = errorText(e) || lastError;
+                    }
+                }
+            });
+
+            return { made: made, failed: failed, lastError: lastError };
+        }
+
+        function reportCreateResult(result) {
+            var madeN = result && result.made ? result.made.length : 0;
+            var failed = result ? result.failed : 0;
+            var msg;
+
+            if (!result) {
+                alert("作成に失敗しました。");
+                return;
+            }
+
+            try { doc.selection = result.made; } catch (_) {}
+            try { app.redraw(); } catch (_) {}
+            try { app.refresh(); } catch (_) {}
+
+            if (failed > 0) {
+                statusText.text = madeN + "件作成 / " + failed + "件失敗";
+                msg = madeN + "件を作成しました。\n" +
+                    failed + "件は作成できませんでした。";
+                if (result.lastError) msg += "\n\n" + result.lastError;
+                alert(msg);
+            } else {
+                statusText.text = madeN + "件を作成しました。";
+                alert(madeN + "件を作成しました。");
+            }
+        }
+
+        $.global.__greenOverlayExecute = function () {
+            var result;
+            try {
+                result = createOverlays(pendingDestination);
+            } catch (e) {
+                result = { made: [], failed: 1, lastError: errorText(e) };
+            }
+            reportCreateResult(result);
+        };
 
         runButton.onClick = function () {
             try {
@@ -872,6 +1014,13 @@
                     return;
                 }
 
+                try {
+                    if (destination.locked) {
+                        alert("作成先がロックされています。");
+                        return;
+                    }
+                } catch (_) {}
+
                 var count = selectedCount();
                 if (!count) {
                     alert("対象オブジェクトを選択してください。");
@@ -886,63 +1035,13 @@
                     return;
                 }
 
-                var made = [];
-                var failed = 0;
-                var i, entry;
+                pendingDestination = destination;
 
-                withDocumentCoordinates(function () {
-                    var b, rect, width, height;
-
-                    for (i = 0; i < objectEntries.length; i++) {
-                        entry = objectEntries[i];
-
-                        if (!entry.selectable || !picked[entry.id]) continue;
-
-                        try {
-                            b = entry.ref.geometricBounds;
-                            width = Math.abs(b[2] - b[0]);
-                            height = Math.abs(b[1] - b[3]);
-
-                            if (width <= 0 || height <= 0) {
-                                failed++;
-                                continue;
-                            }
-
-                            rect = destination.pathItems.rectangle(
-                                b[1],
-                                b[0],
-                                width,
-                                height
-                            );
-                            rect.stroked = false;
-                            rect.filled = true;
-                            rect.fillColor = greenColor();
-                            rect.name = "グリーンオーバーレイ";
-
-                            made.push(rect);
-                        } catch (_) {
-                            failed++;
-                        }
-                    }
-                });
-
-                try { doc.selection = made; } catch (_) {}
-                try { app.redraw(); } catch (_) {}
-                try { app.refresh(); } catch (_) {}
-
-                if (failed > 0) {
-                    statusText.text =
-                        made.length + "件作成 / " +
-                        failed + "件失敗";
-                    alert(
-                        made.length + "件を作成しました。\n" +
-                        failed + "件は作成できませんでした。"
-                    );
-                } else {
-                    statusText.text =
-                        made.length + "件を作成しました。";
-                    alert(made.length + "件を作成しました。");
-                }
+                sendBridgeTalk(
+                    '#targetengine "greenOverlayEngine"\n' +
+                    "try{$.global.__greenOverlayExecute();}" +
+                    "catch(e){alert('作成に失敗しました。\\n'+e);}"
+                );
             } catch (e) {
                 showError(e);
             }
@@ -956,6 +1055,7 @@
             try {
                 $.global.__greenOverlayWindow = null;
                 $.global.__greenOverlayFollowCanvas = null;
+                $.global.__greenOverlayExecute = null;
             } catch (_) {}
         };
 
