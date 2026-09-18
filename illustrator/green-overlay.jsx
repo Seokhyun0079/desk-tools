@@ -18,6 +18,7 @@
 
         try {
             if ($.global.__greenOverlayWindow) {
+                $.global.__greenOverlayWindow.visible = false;
                 $.global.__greenOverlayWindow.close();
             }
         } catch (_) {}
@@ -25,19 +26,18 @@
         var doc = app.activeDocument;
         var destinationRefs = [];
         var objectEntries = [];
+        var objectRoots = [];
+        var objectRows = [];
         var picked = {};
+        var suppressObjectEvent = 0;
+        var inObjectListHandler = false;
+        var cachedZoom = 1;
+        try {
+            if (doc.views.length > 0) cachedZoom = doc.views[0].zoom;
+        } catch (_) {}
 
         function typeOf(item) {
             try { return item.typename; } catch (_) { return ""; }
-        }
-
-        function nameOf(item) {
-            try {
-                if (item.name) return item.name;
-                return "<" + item.typename + ">";
-            } catch (_) {
-                return "<オブジェクト>";
-            }
         }
 
         function kindLabel(item) {
@@ -56,6 +56,95 @@
             return t || "オブジェクト";
         }
 
+        function cleanText(s) {
+            if (s === null || s === undefined) return "";
+            s = String(s);
+            s = s.replace(/\r\n/g, " ").replace(/\n/g, " ").replace(/\r/g, " ").replace(/\t/g, " ");
+            while (s.indexOf("  ") >= 0) s = s.replace("  ", " ");
+            return s.replace(/^ +/, "").replace(/ +$/, "");
+        }
+
+        function shorten(s, maxLen) {
+            if (!s) return "";
+            if (s.length <= maxLen) return s;
+            return s.substring(0, maxLen - 1) + "…";
+        }
+
+        function isUsefulName(name) {
+            name = cleanText(name);
+            if (!name) return false;
+            if (name.charAt(0) === "<" && name.charAt(name.length - 1) === ">") return false;
+            return true;
+        }
+
+        function fileNameOf(item) {
+            try {
+                if (item.file && item.file.name) return item.file.name;
+            } catch (_) {}
+            return "";
+        }
+
+        function swatchNameOf(item) {
+            try {
+                if (!item.filled) return "";
+                var c = item.fillColor;
+                if (!c) return "";
+                if (c.typename === "SpotColor" && c.spot && c.spot.name) return c.spot.name;
+                if (c.typename === "PatternColor" && c.pattern && c.pattern.name) return c.pattern.name;
+                if (c.typename === "GradientColor" && c.gradient && c.gradient.name) return c.gradient.name;
+            } catch (_) {}
+            return "";
+        }
+
+        function displayName(item, fallback) {
+            var t = typeOf(item);
+            var n = "";
+            var extra;
+
+            try { n = item.name; } catch (_) {}
+            if (isUsefulName(n)) return cleanText(n);
+
+            try {
+                if (isUsefulName(item.note)) return shorten(cleanText(item.note), 32);
+            } catch (_) {}
+
+            if (t === "TextFrame") {
+                try {
+                    extra = cleanText(item.contents);
+                    if (extra) return shorten(extra, 32);
+                } catch (_) {}
+            }
+
+            if (t === "PlacedItem" || t === "RasterItem") {
+                extra = fileNameOf(item);
+                if (extra) return extra;
+            }
+
+            if (t === "SymbolItem") {
+                try {
+                    if (item.symbol && isUsefulName(item.symbol.name)) {
+                        return item.symbol.name;
+                    }
+                } catch (_) {}
+            }
+
+            if (t === "GroupItem") {
+                try {
+                    if (item.clipped) return "クリップグループ";
+                } catch (_) {}
+            }
+
+            if (t === "PathItem") {
+                try {
+                    if (item.clipping) return "クリッピングパス";
+                } catch (_) {}
+                extra = swatchNameOf(item);
+                if (extra) return extra;
+            }
+
+            return fallback;
+        }
+
         function withDocumentCoordinates(fn) {
             var oldSystem = app.coordinateSystem;
             try {
@@ -68,7 +157,8 @@
 
         function boundsOf(item) {
             return withDocumentCoordinates(function () {
-                var b = item.geometricBounds;
+                var b;
+                try { b = item.visibleBounds; } catch (_) { b = item.geometricBounds; }
                 return {
                     left: b[0],
                     top: b[1],
@@ -80,48 +170,186 @@
             });
         }
 
-        function directChildren(container) {
-            var result = [];
-            var i, child;
-            var t = typeOf(container);
+        function indentText(depth) {
+            var s = "";
+            var i;
+            for (i = 0; i < depth; i++) s += "    ";
+            return s;
+        }
+
+        function jsNumber(n) {
+            if (isNaN(n)) return "0";
+            return String(Math.round(n * 1000) / 1000);
+        }
+
+        function sameItem(a, b) {
+            if (!a || !b) return false;
+            try { if (a === b) return true; } catch (_) {}
+            try { if (a == b) return true; } catch (_) {}
+            try {
+                if (a.typename !== b.typename) return false;
+            } catch (_) {
+                return false;
+            }
+            try {
+                if (a.absoluteZOrderPosition === b.absoluteZOrderPosition) return true;
+            } catch (_) {}
+            return false;
+        }
+
+        function itemKey(item) {
+            try {
+                return item.typename + "#" + item.absoluteZOrderPosition;
+            } catch (_) {}
+            try {
+                return item.typename + "@" + item.zOrderPosition + ":" + item.name;
+            } catch (_) {}
+            return "";
+        }
+
+        function pushUnique(result, seen, item) {
+            var key = itemKey(item);
+            if (key) {
+                if (seen[key]) return;
+                seen[key] = true;
+            }
+            result.push(item);
+        }
+
+        function parentOf(item) {
+            try { return item.parent; } catch (_) { return null; }
+        }
+
+        function isDirectChild(item, container) {
+            var p = parentOf(item);
+            var clipped = false;
+            var pt;
+
+            if (!p) return false;
+            if (sameItem(p, container)) return true;
 
             try {
-                if (t === "Document") {
-                    for (i = 0; i < container.layers.length; i++) {
-                        result.push(container.layers[i]);
-                    }
-                } else if (t === "Layer") {
-                    for (i = 0; i < container.pageItems.length; i++) {
-                        child = container.pageItems[i];
-                        try {
-                            if (child.parent === container) result.push(child);
-                        } catch (_) {}
-                    }
-                    for (i = 0; i < container.layers.length; i++) {
-                        result.push(container.layers[i]);
-                    }
-                } else if (t === "GroupItem") {
-                    for (i = 0; i < container.pageItems.length; i++) {
-                        child = container.pageItems[i];
-                        try {
-                            if (child.parent === container) result.push(child);
-                        } catch (_) {}
-                    }
-                } else if (t === "CompoundPathItem") {
-                    for (i = 0; i < container.pathItems.length; i++) {
-                        child = container.pathItems[i];
-                        try {
-                            if (child.parent === container) result.push(child);
-                        } catch (_) {}
+                clipped = typeOf(container) === "GroupItem" && container.clipped;
+            } catch (_) {}
+
+            if (!clipped) return false;
+
+            try {
+                pt = typeOf(p);
+                if (pt === "Layer" || pt === "Document") return true;
+            } catch (_) {}
+
+            return false;
+        }
+
+        function addCollectionItems(container, prop, result, seen, requireDirect) {
+            var col, i, item;
+            try {
+                col = container[prop];
+                if (!col) return;
+                for (i = 0; i < col.length; i++) {
+                    item = col[i];
+                    if (!requireDirect || isDirectChild(item, container)) {
+                        pushUnique(result, seen, item);
                     }
                 }
             } catch (_) {}
-
-            return result;
         }
 
-        function hasChildren(item) {
-            return directChildren(item).length > 0;
+        function addTypedChildren(container, result, seen, requireDirect) {
+            var props = [
+                "groupItems",
+                "compoundPathItems",
+                "pathItems",
+                "textFrames",
+                "placedItems",
+                "rasterItems",
+                "symbolItems",
+                "meshItems",
+                "pluginItems",
+                "graphItems",
+                "nonNativeItems",
+                "legacyTextItems"
+            ];
+            var i;
+            for (i = 0; i < props.length; i++) {
+                addCollectionItems(container, props[i], result, seen, requireDirect);
+            }
+        }
+
+        function sortByStack(items) {
+            items.sort(function (a, b) {
+                var za = 0;
+                var zb = 0;
+                try {
+                    za = a.absoluteZOrderPosition;
+                    zb = b.absoluteZOrderPosition;
+                    return zb - za;
+                } catch (_) {}
+                try {
+                    za = a.zOrderPosition;
+                    zb = b.zOrderPosition;
+                    return za - zb;
+                } catch (__) {}
+                return 0;
+            });
+        }
+
+        function artItemCount(items) {
+            var n = 0;
+            var i;
+            for (i = 0; i < items.length; i++) {
+                if (typeOf(items[i]) !== "Layer") n++;
+            }
+            return n;
+        }
+
+        function directChildren(container) {
+            var result = [];
+            var seen = {};
+            var i, t;
+
+            t = typeOf(container);
+
+            if (t === "Document") {
+                try {
+                    for (i = 0; i < container.layers.length; i++) {
+                        result.push(container.layers[i]);
+                    }
+                } catch (_) {}
+                return result;
+            }
+
+            if (t === "CompoundPathItem") {
+                addCollectionItems(container, "pathItems", result, seen, false);
+                return result;
+            }
+
+            if (t === "Layer") {
+                try {
+                    for (i = 0; i < container.layers.length; i++) {
+                        pushUnique(result, seen, container.layers[i]);
+                    }
+                } catch (_) {}
+            }
+
+            addCollectionItems(container, "pageItems", result, seen, true);
+
+            if (artItemCount(result) === 0) {
+                addTypedChildren(container, result, seen, true);
+            }
+
+            if (artItemCount(result) === 0) {
+                addCollectionItems(container, "groupItems", result, seen, false);
+                addCollectionItems(container, "compoundPathItems", result, seen, false);
+            }
+
+            if (artItemCount(result) === 0) {
+                addTypedChildren(container, result, seen, false);
+            }
+
+            sortByStack(result);
+            return result;
         }
 
         function isDestination(item) {
@@ -129,20 +357,44 @@
             return t === "Layer" || t === "GroupItem";
         }
 
-        function isSelectableTarget(item) {
-            var t = typeOf(item);
-            return t !== "Layer" &&
-                   t !== "GroupItem" &&
-                   t !== "CompoundPathItem";
+        function destinationChildren(container) {
+            var result = [];
+            var children = directChildren(container);
+            var i;
+            for (i = 0; i < children.length; i++) {
+                if (isDestination(children[i])) result.push(children[i]);
+            }
+            return result;
         }
 
-        function objectText(entry) {
-            var item = entry.ref;
-            if (entry.selectable) {
-                return (picked[entry.id] ? "[x] " : "[ ] ") +
-                    nameOf(item) + "  [" + kindLabel(item) + "]";
+        function isStructuralContainer(item) {
+            var t = typeOf(item);
+            return t === "Layer" || t === "GroupItem" || t === "CompoundPathItem";
+        }
+
+        function labeledName(item, counts) {
+            var kind = kindLabel(item);
+            if (!counts[kind]) counts[kind] = 0;
+            counts[kind]++;
+            return displayName(item, kind + " " + counts[kind]);
+        }
+
+        function objectRowText(entry) {
+            var marker;
+            var check = "";
+
+            if (entry.children.length > 0) {
+                marker = entry.expanded ? "▼ " : "▶ ";
+            } else {
+                marker = "  ";
             }
-            return nameOf(item) + "  [" + kindLabel(item) + "]";
+
+            if (entry.selectable) {
+                check = picked[entry.id] ? "[x] " : "[ ] ";
+            }
+
+            return indentText(entry.depth) + marker + check +
+                entry.label + "  [" + kindLabel(entry.ref) + "]";
         }
 
         var w = new Window(
@@ -186,8 +438,17 @@
         var countText = toolbar.add("statictext", undefined, "0件選択");
         countText.characters = 16;
 
-        var objectTree = objectPanel.add("treeview", undefined, []);
-        objectTree.preferredSize = [480, 330];
+        /*
+          TreeView は onClick が来ない。ネイティブ複数選択は Ctrl/Cmd 必須。
+          クリック・トグルは ListBox で扱い、階層の開閉は行テキストで表現する。
+        */
+        var objectList = objectPanel.add(
+            "listbox",
+            undefined,
+            [],
+            { multiselect: false }
+        );
+        objectList.preferredSize = [480, 330];
 
         var infoPanel = w.add("panel", undefined, "選択情報");
         infoPanel.orientation = "column";
@@ -206,7 +467,7 @@
         bottom.orientation = "row";
         bottom.alignment = ["fill", "bottom"];
 
-        var statusText = bottom.add("statictext", undefined, "読み込み中…");
+        var statusText = bottom.add("statictext", undefined, "準備完了");
         statusText.alignment = ["fill", "center"];
 
         var runButton = bottom.add("button", undefined, "確認 / 実行");
@@ -227,6 +488,15 @@
                 destinationTree.selection !== null;
         }
 
+        function labelOfItem(item) {
+            var i, entry;
+            for (i = 0; i < objectEntries.length; i++) {
+                entry = objectEntries[i];
+                if (entry.ref === item || sameItem(entry.ref, item)) return entry.label;
+            }
+            return displayName(item, kindLabel(item));
+        }
+
         function updateCountAndInfo(clickedItem) {
             var count = selectedCount();
             countText.text = count + "件選択";
@@ -235,7 +505,7 @@
                 try {
                     var b = boundsOf(clickedItem);
                     infoText.text =
-                        "名前: " + nameOf(clickedItem) +
+                        "名前: " + labelOfItem(clickedItem) +
                         "\n種類: " + kindLabel(clickedItem) +
                         " / サイズ: " +
                         b.width.toFixed(2) + " × " +
@@ -266,111 +536,222 @@
                     entry.ref.selected = true;
                 } catch (_) {}
             }
-
-            try { app.redraw(); } catch (_) {}
         }
 
-        function focusItem(item) {
+        function activeView() {
             try {
-                withDocumentCoordinates(function () {
-                    var b = item.geometricBounds;
-                    var centerX = (b[0] + b[2]) / 2;
-                    var centerY = (b[1] + b[3]) / 2;
+                if (doc.activeView) return doc.activeView;
+            } catch (_) {}
+            if (doc.views.length > 0) return doc.views[0];
+            return null;
+        }
 
-                    if (doc.views.length > 0) {
-                        doc.views[0].centerPoint = [centerX, centerY];
-                    }
-                });
+        function zOrderOf(item) {
+            try { return item.absoluteZOrderPosition; } catch (_) { return null; }
+        }
 
-                app.redraw();
-            } catch (e) {
-                statusText.text = "表示位置を移動できませんでした。";
+        function currentZoom() {
+            try {
+                var view = activeView();
+                if (view && view.zoom) return view.zoom;
+            } catch (_) {}
+            return cachedZoom;
+        }
+
+        function sendBridgeTalk(code) {
+            var bt = new BridgeTalk();
+            try {
+                bt.target = BridgeTalk.appSpecifier || "illustrator";
+            } catch (_) {
+                bt.target = "illustrator";
             }
+            bt.body = code;
+            bt.send();
+        }
+
+        function panByZScript(z, typename, zoom) {
+            return (
+                "(function(){" +
+                "if(!app.documents.length)return;" +
+                "var doc=app.activeDocument;" +
+                "var wantZ=" + jsNumber(z) + ";" +
+                "var wantT='" + typename + "';" +
+                "var zoom=" + jsNumber(zoom) + ";" +
+                "var oldcs=app.coordinateSystem;" +
+                "app.coordinateSystem=CoordinateSystem.DOCUMENTCOORDINATESYSTEM;" +
+                "function panTo(item){" +
+                "var b,v,p;" +
+                "try{b=item.visibleBounds;}catch(e0){b=item.geometricBounds;}" +
+                "p=[(b[0]+b[2])/2,(b[1]+b[3])/2];" +
+                "v=doc.views[0];" +
+                "try{if(doc.activeView)v=doc.activeView;}catch(e1){}" +
+                "v.centerPoint=p;" +
+                "v.zoom=zoom;" +
+                "v.centerPoint=p;" +
+                "try{app.redraw();}catch(e2){}" +
+                "}" +
+                "function match(item){" +
+                "try{return item.typename==wantT&&item.absoluteZOrderPosition==wantZ;}catch(e3){return false;}" +
+                "}" +
+                "var i,item;" +
+                "try{" +
+                "for(i=0;i<doc.pageItems.length;i++){" +
+                "item=doc.pageItems[i];" +
+                "if(match(item)){panTo(item);try{app.coordinateSystem=oldcs;}catch(e4){}return;}" +
+                "}" +
+                "}catch(e5){}" +
+                "try{" +
+                "for(i=0;i<doc.pathItems.length;i++){" +
+                "item=doc.pathItems[i];" +
+                "if(match(item)){panTo(item);try{app.coordinateSystem=oldcs;}catch(e6){}return;}" +
+                "}" +
+                "}catch(e7){}" +
+                "try{app.coordinateSystem=oldcs;}catch(e8){}" +
+                "})();"
+            );
+        }
+
+        function requestCanvasFollow(entry) {
+            if (!entry || entry.zOrder === null || entry.zOrder === undefined) return;
+            sendBridgeTalk(panByZScript(entry.zOrder, entry.itemType, currentZoom()));
         }
 
         function addDestinationBranch(container, uiParent) {
-            var children = directChildren(container);
-            var i, item, node;
+            var children = destinationChildren(container);
+            var i, item, node, destKids, counts, label;
 
+            counts = {};
             for (i = 0; i < children.length; i++) {
                 item = children[i];
+                destKids = destinationChildren(item);
+                label = labeledName(item, counts);
 
-                if (!isDestination(item)) continue;
-
-                node = uiParent.add(
-                    "node",
-                    nameOf(item) + "  [" + kindLabel(item) + "]"
-                );
-                node._destinationIndex = destinationRefs.length;
-                destinationRefs.push(item);
-                node.expanded = false;
-
-                addDestinationBranch(item, node);
+                if (destKids.length > 0) {
+                    node = uiParent.add("node", label + "  [" + kindLabel(item) + "]");
+                    node._destinationIndex = destinationRefs.length;
+                    destinationRefs.push({
+                        ref: item,
+                        z: zOrderOf(item),
+                        type: typeOf(item),
+                        name: ""
+                    });
+                    try {
+                        destinationRefs[node._destinationIndex].name = String(item.name);
+                    } catch (_) {}
+                    addDestinationBranch(item, node);
+                    node.expanded = false;
+                } else {
+                    node = uiParent.add("item", label + "  [" + kindLabel(item) + "]");
+                    node._destinationIndex = destinationRefs.length;
+                    destinationRefs.push({
+                        ref: item,
+                        z: zOrderOf(item),
+                        type: typeOf(item),
+                        name: ""
+                    });
+                    try {
+                        destinationRefs[node._destinationIndex].name = String(item.name);
+                    } catch (_) {}
+                }
             }
         }
 
-        function addObjectBranch(container, uiParent) {
+        function collectObjectBranch(container, depth) {
             var children = directChildren(container);
-            var i, item, childList, node, entry;
+            var nodes = [];
+            var i, item, entry, counts;
 
+            counts = {};
             for (i = 0; i < children.length; i++) {
                 item = children[i];
-                childList = directChildren(item);
-
                 entry = {
                     id: objectEntries.length,
                     ref: item,
-                    selectable: isSelectableTarget(item),
-                    ui: null
+                    depth: depth,
+                    selectable: false,
+                    expanded: false,
+                    children: [],
+                    label: labeledName(item, counts),
+                    zOrder: zOrderOf(item),
+                    itemType: typeOf(item)
                 };
                 objectEntries.push(entry);
 
-                if (childList.length > 0) {
-                    node = uiParent.add("node", objectText(entry));
-                    node.expanded = false;
+                if (isStructuralContainer(item)) {
+                    entry.selectable = false;
+                    entry.children = collectObjectBranch(item, depth + 1);
                 } else {
-                    node = uiParent.add("item", objectText(entry));
+                    entry.children = collectObjectBranch(item, depth + 1);
+                    entry.selectable = entry.children.length === 0;
                 }
 
-                node._entryId = entry.id;
-                entry.ui = node;
+                nodes.push(entry);
+            }
 
-                if (childList.length > 0) {
-                    addObjectBranch(item, node);
+            return nodes;
+        }
+
+        function appendVisibleEntries(nodes, out) {
+            var i, entry;
+            for (i = 0; i < nodes.length; i++) {
+                entry = nodes[i];
+                out.push(entry);
+                if (entry.expanded && entry.children.length > 0) {
+                    appendVisibleEntries(entry.children, out);
                 }
             }
         }
 
-        function refreshSelectionMarkers() {
+        function paintObjectList() {
+            var visible = [];
+            var i, entry, row;
+
+            appendVisibleEntries(objectRoots, visible);
+
+            suppressObjectEvent++;
+            try {
+                objectList.removeAll();
+                objectRows = [];
+
+                for (i = 0; i < visible.length; i++) {
+                    entry = visible[i];
+                    row = objectList.add("item", objectRowText(entry));
+                    objectRows[row.index] = entry;
+                    entry.ui = row;
+                }
+            } finally {
+                suppressObjectEvent--;
+            }
+        }
+
+        function refreshVisibleObjectRows() {
             var i, entry;
-            for (i = 0; i < objectEntries.length; i++) {
-                entry = objectEntries[i];
+            for (i = 0; i < objectRows.length; i++) {
+                entry = objectRows[i];
                 try {
-                    entry.ui.text = objectText(entry);
+                    if (entry.ui) entry.ui.text = objectRowText(entry);
                 } catch (_) {}
             }
         }
 
         function rebuildTrees() {
-            statusText.text = "読み込み中…";
-            w.update();
-
             destinationRefs = [];
             objectEntries = [];
+            objectRoots = [];
+            objectRows = [];
             picked = {};
 
             destinationTree.removeAll();
-            objectTree.removeAll();
-
             addDestinationBranch(doc, destinationTree);
-            addObjectBranch(doc, objectTree);
+
+            objectRoots = collectObjectBranch(doc, 0);
+            paintObjectList();
 
             countText.text = "0件選択";
             infoText.text = "オブジェクトを選択してください。";
             statusText.text = "準備完了";
 
             updateRunState();
-            w.update();
         }
 
         destinationTree.onChange = function () {
@@ -385,36 +766,64 @@
             }
         };
 
-        objectTree.onClick = function () {
+        function handleObjectListEvent() {
             try {
-                var clicked = objectTree.selection;
-                if (clicked === null) return;
+                var row, entry, i;
 
-                var entryId = clicked._entryId;
-                var entry =
-                    (entryId === undefined || entryId === null)
-                        ? null
-                        : objectEntries[entryId];
+                if (suppressObjectEvent > 0 || inObjectListHandler) return;
+                inObjectListHandler = true;
 
-                if (entry && entry.selectable) {
-                    picked[entry.id] = !picked[entry.id];
-                    clicked.text = objectText(entry);
-
-                    applyIllustratorSelection();
-                    focusItem(entry.ref);
-                    updateCountAndInfo(entry.ref);
+                row = objectList.selection;
+                if (row === null) {
+                    inObjectListHandler = false;
+                    return;
                 }
 
-                /*
-                  TreeView 자체의 selection은 단일 선택이므로
-                  체크 상태와 혼동되지 않도록 클릭 처리가 끝난 뒤 해제한다.
-                  복수 선택 상태는 picked에만 보존된다.
-                */
-                objectTree.selection = null;
+                entry = objectRows[row.index];
+                if (!entry) {
+                    inObjectListHandler = false;
+                    return;
+                }
+
+                if (entry.selectable) {
+                    picked[entry.id] = !picked[entry.id];
+                    row.text = objectRowText(entry);
+                    updateCountAndInfo(entry.ref);
+                    try { applyIllustratorSelection(); } catch (_) {}
+                    requestCanvasFollow(entry);
+                    inObjectListHandler = false;
+                    return;
+                }
+
+                if (entry.children.length === 0) {
+                    inObjectListHandler = false;
+                    return;
+                }
+
+                entry.expanded = !entry.expanded;
+
+                suppressObjectEvent++;
+                try {
+                    paintObjectList();
+                    for (i = 0; i < objectRows.length; i++) {
+                        if (objectRows[i].id === entry.id) {
+                            objectList.selection = i;
+                            break;
+                        }
+                    }
+                } catch (_) {
+                } finally {
+                    suppressObjectEvent--;
+                    inObjectListHandler = false;
+                }
             } catch (e) {
+                inObjectListHandler = false;
                 showError(e);
             }
-        };
+        }
+
+        objectList.onClick = handleObjectListEvent;
+        objectList.onChange = handleObjectListEvent;
 
         selectAllButton.onClick = function () {
             try {
@@ -427,8 +836,8 @@
                     }
                 }
 
-                refreshSelectionMarkers();
-                applyIllustratorSelection();
+                refreshVisibleObjectRows();
+                try { applyIllustratorSelection(); } catch (_) {}
                 updateCountAndInfo(null);
                 statusText.text = "すべて選択しました。";
             } catch (e) {
@@ -439,11 +848,8 @@
         clearButton.onClick = function () {
             try {
                 picked = {};
-                refreshSelectionMarkers();
-
+                refreshVisibleObjectRows();
                 try { doc.selection = null; } catch (_) {}
-                try { app.redraw(); } catch (_) {}
-
                 updateCountAndInfo(null);
                 statusText.text = "すべて解除しました。";
             } catch (e) {
@@ -451,12 +857,135 @@
             }
         };
 
-        function greenColor() {
-            var color = new RGBColor();
-            color.red = 0;
-            color.green = 200;
-            color.blue = 70;
-            return color;
+        function jsString(s) {
+            return String(s)
+                .replace(/\\/g, "\\\\")
+                .replace(/"/g, '\\"')
+                .replace(/\r/g, "\\r")
+                .replace(/\n/g, "\\n");
+        }
+
+        function collectPickedKeys() {
+            var keys = [];
+            var i, entry;
+            for (i = 0; i < objectEntries.length; i++) {
+                entry = objectEntries[i];
+                if (!entry.selectable || !picked[entry.id]) continue;
+                if (entry.zOrder === null || entry.zOrder === undefined) continue;
+                keys.push(
+                    "{z:" + jsNumber(entry.zOrder) +
+                    ",t:\"" + entry.itemType + "\"}"
+                );
+            }
+            return keys;
+        }
+
+        function buildExecuteScript(destInfo) {
+            var keys = collectPickedKeys();
+            var destType, destName, destZ;
+
+            if (keys.length === 0) {
+                return "alert('対象オブジェクトを特定できません。');";
+            }
+
+            destType = destInfo.type || "Layer";
+            destName = jsString(destInfo.name || "");
+            destZ = destInfo.z === null || destInfo.z === undefined
+                ? "null"
+                : jsNumber(destInfo.z);
+
+            return (
+                "(function(){" +
+                "if(!app.documents.length){alert('ドキュメントが開かれていません。');return;}" +
+                "var doc=app.activeDocument;" +
+                "var oldcs=app.coordinateSystem;" +
+                "app.coordinateSystem=CoordinateSystem.DOCUMENTCOORDINATESYSTEM;" +
+                "function walkLayers(parent,z,name){" +
+                "var i,lyr,found;" +
+                "if(!parent.layers)return null;" +
+                "for(i=0;i<parent.layers.length;i++){" +
+                "lyr=parent.layers[i];" +
+                "try{if(z!==null&&lyr.absoluteZOrderPosition==z)return lyr;}catch(e0){}" +
+                "try{if(name!==''&&lyr.name==name)return lyr;}catch(e1){}" +
+                "found=walkLayers(lyr,z,name);if(found)return found;" +
+                "}" +
+                "return null;" +
+                "}" +
+                "function findDest(){" +
+                "var wantType='" + destType + "';" +
+                "var wantZ=" + destZ + ";" +
+                "var wantName=\"" + destName + "\";" +
+                "var i,g;" +
+                "if(wantType=='Layer'){" +
+                "var L=walkLayers(doc,wantZ,wantName);if(L)return L;" +
+                "}" +
+                "if(wantType=='GroupItem'){" +
+                "try{" +
+                "for(i=0;i<doc.groupItems.length;i++){" +
+                "g=doc.groupItems[i];" +
+                "try{if(wantZ!==null&&g.absoluteZOrderPosition==wantZ)return g;}catch(e2){}" +
+                "}" +
+                "}catch(e3){}" +
+                "}" +
+                "return doc.activeLayer;" +
+                "}" +
+                "function findItem(z,t){" +
+                "var i,item;" +
+                "try{" +
+                "for(i=0;i<doc.pageItems.length;i++){" +
+                "item=doc.pageItems[i];" +
+                "try{if(item.typename==t&&item.absoluteZOrderPosition==z)return item;}catch(e4){}" +
+                "}" +
+                "}catch(e5){}" +
+                "try{" +
+                "for(i=0;i<doc.pathItems.length;i++){" +
+                "item=doc.pathItems[i];" +
+                "try{if(item.absoluteZOrderPosition==z)return item;}catch(e6){}" +
+                "}" +
+                "}catch(e7){}" +
+                "return null;" +
+                "}" +
+                "var dest=findDest();" +
+                "var keys=[" + keys.join(",") + "];" +
+                "var color=null;" +
+                "try{" +
+                "if(doc.documentColorSpace===DocumentColorSpace.CMYK){" +
+                "color=new CMYKColor();color.cyan=75;color.magenta=0;color.yellow=80;color.black=0;" +
+                "}" +
+                "}catch(e8){}" +
+                "if(!color){color=new RGBColor();color.red=0;color.green=200;color.blue=70;}" +
+                "var made=[],failed=0,lastError='';" +
+                "var i,src,b,w,h,top,left,rect;" +
+                "for(i=0;i<keys.length;i++){" +
+                "try{" +
+                "src=findItem(keys[i].z,keys[i].t);" +
+                "if(!src){failed++;lastError='対象が見つかりません';continue;}" +
+                "try{b=src.geometricBounds;}catch(e9){b=src.visibleBounds;}" +
+                "w=Math.abs(b[2]-b[0]);h=Math.abs(b[1]-b[3]);" +
+                "if(w<=0||h<=0){failed++;continue;}" +
+                "top=b[1]>b[3]?b[1]:b[3];left=b[0]<b[2]?b[0]:b[2];" +
+                "rect=null;" +
+                "try{rect=dest.pathItems.rectangle(top,left,w,h);}" +
+                "catch(e10){" +
+                "rect=doc.pathItems.rectangle(top,left,w,h);" +
+                "try{rect.move(dest,ElementPlacement.PLACEATBEGINNING);}catch(e11){}" +
+                "}" +
+                "rect.stroked=false;rect.filled=true;" +
+                "try{rect.fillColor=color;}catch(e12){}" +
+                "rect.name='グリーンオーバーレイ';" +
+                "made.push(rect);" +
+                "}catch(e13){failed++;lastError=String(e13);}" +
+                "}" +
+                "try{app.coordinateSystem=oldcs;}catch(e14){}" +
+                "try{doc.selection=made;}catch(e15){}" +
+                "try{app.redraw();}catch(e16){}" +
+                "if(failed>0){" +
+                "alert(made.length+'件を作成しました。\\n'+failed+'件は作成できませんでした。'+(lastError?'\\n\\n'+lastError:''));" +
+                "}else{" +
+                "alert(made.length+'件を作成しました。');" +
+                "}" +
+                "})();"
+            );
         }
 
         runButton.onClick = function () {
@@ -468,13 +997,19 @@
                 }
 
                 var destinationIndex = destinationNode._destinationIndex;
-                var destination =
-                    destinationRefs[destinationIndex];
+                var destInfo = destinationRefs[destinationIndex];
 
-                if (!destination) {
+                if (!destInfo || !destInfo.ref) {
                     alert("作成先を取得できません。");
                     return;
                 }
+
+                try {
+                    if (destInfo.ref.locked) {
+                        alert("作成先がロックされています。");
+                        return;
+                    }
+                } catch (_) {}
 
                 var count = selectedCount();
                 if (!count) {
@@ -490,66 +1025,8 @@
                     return;
                 }
 
-                var made = [];
-                var failed = 0;
-                var i, entry;
-
-                withDocumentCoordinates(function () {
-                    var b, rect;
-
-                    for (i = 0; i < objectEntries.length; i++) {
-                        entry = objectEntries[i];
-
-                        if (!entry.selectable ||
-                            !picked[entry.id]) {
-                            continue;
-                        }
-
-                        try {
-                            b = entry.ref.geometricBounds;
-
-                            var width = Math.abs(b[2] - b[0]);
-                            var height = Math.abs(b[1] - b[3]);
-
-                            if (width <= 0 || height <= 0) {
-                                failed++;
-                                continue;
-                            }
-
-                            rect = destination.pathItems.rectangle(
-                                b[1],
-                                b[0],
-                                width,
-                                height
-                            );
-                            rect.stroked = false;
-                            rect.filled = true;
-                            rect.fillColor = greenColor();
-                            rect.name = "グリーンオーバーレイ";
-
-                            made.push(rect);
-                        } catch (_) {
-                            failed++;
-                        }
-                    }
-                });
-
-                try { doc.selection = made; } catch (_) {}
-                try { app.redraw(); } catch (_) {}
-
-                if (failed > 0) {
-                    statusText.text =
-                        made.length + "件作成 / " +
-                        failed + "件失敗";
-                    alert(
-                        made.length + "件を作成しました。\n" +
-                        failed + "件は作成できませんでした。"
-                    );
-                } else {
-                    statusText.text =
-                        made.length + "件を作成しました。";
-                    alert(made.length + "件を作成しました。");
-                }
+                sendBridgeTalk(buildExecuteScript(destInfo));
+                statusText.text = "作成を実行しました。";
             } catch (e) {
                 showError(e);
             }
@@ -565,13 +1042,9 @@
             } catch (_) {}
         };
 
-        /*
-          먼저 패널을 보이고, 그 뒤 계층을 읽는다.
-          큰 문서에서도 "아무것도 안 뜨는" 상태를 피한다.
-        */
-        w.show();
-        w.update();
         rebuildTrees();
+        try { w.layout.layout(true); } catch (_) {}
+        w.show();
 
     } catch (e) {
         showError(e);
