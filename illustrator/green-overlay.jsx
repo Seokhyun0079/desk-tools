@@ -390,7 +390,7 @@
             }
 
             if (entry.selectable) {
-                check = picked[entry.id] ? "[x] " : "[ ] ";
+                check = picked[entry.id] ? "☑ " : "☐ ";
             }
 
             return indentText(entry.depth) + marker + check +
@@ -524,18 +524,11 @@
             updateRunState();
         }
 
-        function applyIllustratorSelection() {
-            var i, entry;
-            try { doc.selection = null; } catch (_) {}
-
-            for (i = 0; i < objectEntries.length; i++) {
-                entry = objectEntries[i];
-                if (!entry.selectable || !picked[entry.id]) continue;
-
-                try {
-                    entry.ref.selected = true;
-                } catch (_) {}
-            }
+        function applyIllustratorSelection(entry) {
+            if (!entry || !entry.selectable) return;
+            try {
+                entry.ref.selected = !!picked[entry.id];
+            } catch (_) {}
         }
 
         function activeView() {
@@ -569,51 +562,32 @@
             bt.send();
         }
 
-        function panByZScript(z, typename, zoom) {
+        function panToPointScript(x, y, zoom) {
             return (
                 "(function(){" +
                 "if(!app.documents.length)return;" +
                 "var doc=app.activeDocument;" +
-                "var wantZ=" + jsNumber(z) + ";" +
-                "var wantT='" + typename + "';" +
-                "var zoom=" + jsNumber(zoom) + ";" +
-                "var oldcs=app.coordinateSystem;" +
-                "app.coordinateSystem=CoordinateSystem.DOCUMENTCOORDINATESYSTEM;" +
-                "function panTo(item){" +
-                "var b,v,p;" +
-                "try{b=item.visibleBounds;}catch(e0){b=item.geometricBounds;}" +
-                "p=[(b[0]+b[2])/2,(b[1]+b[3])/2];" +
-                "v=doc.views[0];" +
-                "try{if(doc.activeView)v=doc.activeView;}catch(e1){}" +
+                "var v=doc.views[0];" +
+                "try{if(doc.activeView)v=doc.activeView;}catch(e0){}" +
+                "var p=[" + jsNumber(x) + "," + jsNumber(y) + "];" +
                 "v.centerPoint=p;" +
-                "v.zoom=zoom;" +
-                "v.centerPoint=p;" +
-                "try{app.redraw();}catch(e2){}" +
-                "}" +
-                "function match(item){" +
-                "try{return item.typename==wantT&&item.absoluteZOrderPosition==wantZ;}catch(e3){return false;}" +
-                "}" +
-                "var i,item;" +
-                "try{" +
-                "for(i=0;i<doc.pageItems.length;i++){" +
-                "item=doc.pageItems[i];" +
-                "if(match(item)){panTo(item);try{app.coordinateSystem=oldcs;}catch(e4){}return;}" +
-                "}" +
-                "}catch(e5){}" +
-                "try{" +
-                "for(i=0;i<doc.pathItems.length;i++){" +
-                "item=doc.pathItems[i];" +
-                "if(match(item)){panTo(item);try{app.coordinateSystem=oldcs;}catch(e6){}return;}" +
-                "}" +
-                "}catch(e7){}" +
-                "try{app.coordinateSystem=oldcs;}catch(e8){}" +
+                "try{v.zoom=" + jsNumber(zoom) + ";}catch(e1){}" +
                 "})();"
             );
         }
 
         function requestCanvasFollow(entry) {
-            if (!entry || entry.zOrder === null || entry.zOrder === undefined) return;
-            sendBridgeTalk(panByZScript(entry.zOrder, entry.itemType, currentZoom()));
+            if (!entry || !entry.ref) return;
+            try {
+                var b = boundsOf(entry.ref);
+                sendBridgeTalk(
+                    panToPointScript(
+                        (b.left + b.right) / 2,
+                        (b.top + b.bottom) / 2,
+                        currentZoom()
+                    )
+                );
+            } catch (_) {}
         }
 
         function addDestinationBranch(container, uiParent) {
@@ -789,7 +763,7 @@
                     picked[entry.id] = !picked[entry.id];
                     row.text = objectRowText(entry);
                     updateCountAndInfo(entry.ref);
-                    try { applyIllustratorSelection(); } catch (_) {}
+                    try { applyIllustratorSelection(entry); } catch (_) {}
                     requestCanvasFollow(entry);
                     inObjectListHandler = false;
                     return;
@@ -837,7 +811,12 @@
                 }
 
                 refreshVisibleObjectRows();
-                try { applyIllustratorSelection(); } catch (_) {}
+                try {
+                    for (i = 0; i < objectEntries.length; i++) {
+                        entry = objectEntries[i];
+                        if (entry.selectable) entry.ref.selected = true;
+                    }
+                } catch (_) {}
                 updateCountAndInfo(null);
                 statusText.text = "すべて選択しました。";
             } catch (e) {
