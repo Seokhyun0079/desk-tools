@@ -929,21 +929,26 @@
                 "}" +
                 "return doc.activeLayer;" +
                 "}" +
-                "function findItem(z,t){" +
-                "var i,item;" +
+                "function keyOf(z,t){return t+'#'+z;}" +
+                "function collectSources(keys){" +
+                "var wanted={},found={},result=[],i,item,k;" +
+                "for(i=0;i<keys.length;i++)wanted[keyOf(keys[i].z,keys[i].t)]=i;" +
                 "try{" +
                 "for(i=0;i<doc.pageItems.length;i++){" +
                 "item=doc.pageItems[i];" +
-                "try{if(item.typename==t&&item.absoluteZOrderPosition==z)return item;}catch(e4){}" +
+                "try{k=keyOf(item.absoluteZOrderPosition,item.typename);}catch(e4){continue;}" +
+                "if(wanted[k]!==undefined&&!found[k]){found[k]=item;}" +
                 "}" +
                 "}catch(e5){}" +
                 "try{" +
                 "for(i=0;i<doc.pathItems.length;i++){" +
                 "item=doc.pathItems[i];" +
-                "try{if(item.absoluteZOrderPosition==z)return item;}catch(e6){}" +
+                "try{k=keyOf(item.absoluteZOrderPosition,item.typename);}catch(e6){continue;}" +
+                "if(wanted[k]!==undefined&&!found[k]){found[k]=item;}" +
                 "}" +
                 "}catch(e7){}" +
-                "return null;" +
+                "for(i=0;i<keys.length;i++){k=keyOf(keys[i].z,keys[i].t);result.push(found[k]||null);}" +
+                "return result;" +
                 "}" +
                 "var dest=findDest();" +
                 "var keys=[" + keys.join(",") + "];" +
@@ -954,11 +959,12 @@
                 "}" +
                 "}catch(e8){}" +
                 "if(!color){color=new RGBColor();color.red=0;color.green=200;color.blue=70;}" +
+                "var sources=collectSources(keys);" +
                 "var made=[],failed=0,lastError='';" +
                 "var i,src,b,w,h,top,left,rect;" +
                 "for(i=0;i<keys.length;i++){" +
                 "try{" +
-                "src=findItem(keys[i].z,keys[i].t);" +
+                "src=sources[i];" +
                 "if(!src){failed++;lastError='対象が見つかりません';continue;}" +
                 "try{b=src.geometricBounds;}catch(e9){b=src.visibleBounds;}" +
                 "w=Math.abs(b[2]-b[0]);h=Math.abs(b[1]-b[3]);" +
