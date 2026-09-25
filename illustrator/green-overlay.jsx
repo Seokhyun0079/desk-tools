@@ -379,12 +379,37 @@
             return displayName(item, kind + " " + counts[kind]);
         }
 
+        function descendantSelectionState(entry) {
+            var total = 0, selected = 0;
+
+            function walk(nodes) {
+                var i, child;
+                for (i = 0; i < nodes.length; i++) {
+                    child = nodes[i];
+                    if (child.selectable) {
+                        total++;
+                        if (picked[child.id]) selected++;
+                    } else if (child.children.length > 0) {
+                        walk(child.children);
+                    }
+                }
+            }
+
+            walk(entry.children);
+            if (total === 0 || selected === 0) return 0;
+            if (selected === total) return 2;
+            return 1;
+        }
+
         function objectRowText(entry) {
             var marker;
             var check = "";
 
             if (entry.children.length > 0) {
                 marker = entry.expanded ? "▼ " : "▶ ";
+                check = descendantSelectionState(entry) === 2
+                    ? "☑ "
+                    : (descendantSelectionState(entry) === 1 ? "◩ " : "☐ ");
             } else {
                 marker = "  ";
             }
@@ -395,6 +420,25 @@
 
             return indentText(entry.depth) + marker + check +
                 entry.label + "  [" + kindLabel(entry.ref) + "]";
+        }
+
+        function groupToggleRowText(entry) {
+            var state = descendantSelectionState(entry);
+            var check = state === 2 ? "☑ " : (state === 1 ? "◩ " : "☐ ");
+            return indentText(entry.depth + 1) + "  " + check + "この階層を全選択 / 全解除";
+        }
+
+        function setDescendantsPicked(entry, value) {
+            var i, child;
+            for (i = 0; i < entry.children.length; i++) {
+                child = entry.children[i];
+                if (child.selectable) {
+                    picked[child.id] = value;
+                    try { child.ref.selected = value; } catch (_) {}
+                } else if (child.children.length > 0) {
+                    setDescendantsPicked(child, value);
+                }
+            }
         }
 
         var w = new Window(
@@ -731,6 +775,14 @@
                     row = objectList.add("item", objectRowText(entry));
                     objectRows[row.index] = entry;
                     entry.ui = row;
+
+                    if (entry.children.length > 0 && entry.expanded) {
+                        row = objectList.add("item", groupToggleRowText(entry));
+                        objectRows[row.index] = {
+                            groupToggle: true,
+                            parentEntry: entry
+                        };
+                    }
                 }
             } finally {
                 suppressObjectEvent--;
@@ -738,11 +790,16 @@
         }
 
         function refreshVisibleObjectRows() {
-            var i, entry;
+            var i, entry, row;
             for (i = 0; i < objectRows.length; i++) {
                 entry = objectRows[i];
                 try {
-                    if (entry.ui) entry.ui.text = objectRowText(entry);
+                    row = objectList.items[i];
+                    if (entry.groupToggle) {
+                        if (row) row.text = groupToggleRowText(entry.parentEntry);
+                    } else if (entry.ui) {
+                        entry.ui.text = objectRowText(entry);
+                    }
                 } catch (_) {}
             }
         }
@@ -794,6 +851,22 @@
 
                 entry = objectRows[row.index];
                 if (!entry) {
+                    inObjectListHandler = false;
+                    return;
+                }
+
+                if (entry.groupToggle) {
+                    var parentEntry = entry.parentEntry;
+                    var turnOn = descendantSelectionState(parentEntry) !== 2;
+                    setDescendantsPicked(parentEntry, turnOn);
+                    refreshVisibleObjectRows();
+                    updateCountAndInfo(null);
+                    statusText.text = turnOn
+                        ? "この階層をすべて選択しました。"
+                        : "この階層をすべて解除しました。";
+                    suppressObjectEvent++;
+                    try { objectList.selection = null; } catch (_) {}
+                    suppressObjectEvent--;
                     inObjectListHandler = false;
                     return;
                 }
