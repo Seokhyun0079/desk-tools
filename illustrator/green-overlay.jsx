@@ -494,6 +494,12 @@
         var countText = toolbar.add("statictext", undefined, "0件選択");
         countText.characters = 16;
 
+        var branchMode = toolbar.add("dropdownlist", undefined, [
+            "行クリック: 開閉",
+            "行クリック: 配下選択"
+        ]);
+        branchMode.selection = 0;
+
         /*
           TreeView は onClick が来ない。ネイティブ複数選択は Ctrl/Cmd 必須。
           クリック・トグルは ListBox で扱い、階層の開閉は行テキストで表現する。
@@ -855,25 +861,32 @@
                     return;
                 }
 
-                if (entry.expanded) {
+                if (branchMode.selection && branchMode.selection.index === 1) {
                     var turnOn = descendantSelectionState(entry) !== 2;
                     setDescendantsPicked(entry, turnOn);
+                    refreshVisibleObjectRows();
+                    updateCountAndInfo(null);
                     statusText.text = turnOn
                         ? "この階層をすべて選択しました。"
                         : "この階層をすべて解除しました。";
-                    updateCountAndInfo(null);
+                } else {
+                    entry.expanded = !entry.expanded;
+                    suppressObjectEvent++;
+                    try {
+                        paintObjectList();
+                    } catch (_) {
+                    } finally {
+                        suppressObjectEvent--;
+                    }
+                    statusText.text = entry.expanded
+                        ? "階層を開きました。"
+                        : "階層を閉じました。";
                 }
-                entry.expanded = !entry.expanded;
 
                 suppressObjectEvent++;
-                try {
-                    paintObjectList();
-                    objectList.selection = null;
-                } catch (_) {
-                } finally {
-                    suppressObjectEvent--;
-                    inObjectListHandler = false;
-                }
+                try { objectList.selection = null; } catch (_) {}
+                suppressObjectEvent--;
+                inObjectListHandler = false;
             } catch (e) {
                 inObjectListHandler = false;
                 showError(e);
