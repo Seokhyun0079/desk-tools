@@ -961,43 +961,19 @@
                 .replace(/\n/g, "\\n");
         }
 
-        function collectPickedBounds() {
-            var result = [];
-            var i, entry, b;
+        function syncIllustratorSelectionFromPicked() {
+            var i, entry;
+            try { doc.selection = null; } catch (_) {}
 
             for (i = 0; i < objectEntries.length; i++) {
                 entry = objectEntries[i];
                 if (!entry.selectable || !picked[entry.id]) continue;
-                try {
-                    b = boundsOf(entry.ref);
-                    if (b.width <= 0 || b.height <= 0) continue;
-                    result.push({
-                        left: b.left,
-                        top: b.top,
-                        right: b.right,
-                        bottom: b.bottom
-                    });
-                } catch (_) {}
+                try { entry.ref.selected = true; } catch (_) {}
             }
-            return result;
         }
 
         function buildExecuteScript(destInfo, settings) {
-            var bounds = collectPickedBounds();
-            var boundsCode = [];
-            var destType, destName, destZ, i, b;
-
-            if (bounds.length === 0) {
-                return "alert('対象オブジェクトの表示領域を取得できません。');";
-            }
-
-            for (i = 0; i < bounds.length; i++) {
-                b = bounds[i];
-                boundsCode.push(
-                    "[" + jsNumber(b.left) + "," + jsNumber(b.top) + "," +
-                    jsNumber(b.right) + "," + jsNumber(b.bottom) + "]"
-                );
-            }
+            var destType, destName, destZ;
 
             destType = destInfo.type || "Layer";
             destName = jsString(destInfo.name || "");
@@ -1041,15 +1017,21 @@
                 "return doc.activeLayer;" +
                 "}" +
                 "var dest=findDest();" +
-                "var bounds=[" + boundsCode.join(",") + "];" +
+                "var sources=[];" +
+                "try{for(var si=0;si<doc.selection.length;si++)sources.push(doc.selection[si]);}catch(eSel){}" +
+                "if(!sources.length){" +
+                "try{app.coordinateSystem=oldcs;}catch(eCS){}" +
+                "alert('対象オブジェクトを取得できません。');return;" +
+                "}" +
                 "var color=new RGBColor();" +
                 "color.red=" + settings.r + ";color.green=" + settings.g + ";color.blue=" + settings.b + ";" +
                 "var overlayOpacity=" + settings.opacity + ";" +
                 "var made=[],failed=0,lastError='';" +
-                "var i,b,w,h,top,left,rect;" +
-                "for(i=0;i<bounds.length;i++){" +
+                "var i,src,b,w,h,top,left,rect;" +
+                "for(i=0;i<sources.length;i++){" +
                 "try{" +
-                "b=bounds[i];" +
+                "src=sources[i];" +
+                "try{b=src.visibleBounds;}catch(e8){b=src.geometricBounds;}" +
                 "w=Math.abs(b[2]-b[0]);h=Math.abs(b[1]-b[3]);" +
                 "if(w<=0||h<=0){failed++;continue;}" +
                 "top=b[1]>b[3]?b[1]:b[3];left=b[0]<b[2]?b[0]:b[2];" +
@@ -1124,6 +1106,7 @@
                     return;
                 }
 
+                syncIllustratorSelectionFromPicked();
                 sendBridgeTalk(buildExecuteScript(destInfo, settings));
                 statusText.text = "作成を実行しました。";
             } catch (e) {
