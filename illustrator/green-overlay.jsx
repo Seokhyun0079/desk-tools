@@ -972,8 +972,28 @@
             }
         }
 
+        function collectPickedKeys() {
+            var keys = [];
+            var i, entry;
+            for (i = 0; i < objectEntries.length; i++) {
+                entry = objectEntries[i];
+                if (!entry.selectable || !picked[entry.id]) continue;
+                if (entry.zOrder === null || entry.zOrder === undefined) continue;
+                keys.push(
+                    "{z:" + jsNumber(entry.zOrder) +
+                    ",t:\"" + jsString(entry.itemType) + "\"}"
+                );
+            }
+            return keys;
+        }
+
         function buildExecuteScript(destInfo, settings) {
+            var keys = collectPickedKeys();
             var destType, destName, destZ;
+
+            if (keys.length === 0) {
+                return "alert('対象オブジェクトを特定できません。');";
+            }
 
             destType = destInfo.type || "Layer";
             destName = jsString(destInfo.name || "");
@@ -1016,21 +1036,45 @@
                 "}" +
                 "return doc.activeLayer;" +
                 "}" +
-                "var dest=findDest();" +
-                "var sources=[];" +
-                "try{for(var si=0;si<doc.selection.length;si++)sources.push(doc.selection[si]);}catch(eSel){}" +
-                "if(!sources.length){" +
-                "try{app.coordinateSystem=oldcs;}catch(eCS){}" +
-                "alert('対象オブジェクトを取得できません。');return;" +
+                "function keyOf(z,t){return t+'#'+z;}" +
+                "function collectSources(keys){" +
+                "var wanted={},found={},result=[],i,item,k;" +
+                "for(i=0;i<keys.length;i++)wanted[keyOf(keys[i].z,keys[i].t)]=true;" +
+                "try{" +
+                "for(i=0;i<doc.pageItems.length;i++){" +
+                "item=doc.pageItems[i];" +
+                "try{k=keyOf(item.absoluteZOrderPosition,item.typename);}catch(e4){continue;}" +
+                "if(wanted[k]&&!found[k])found[k]=item;" +
                 "}" +
+                "}catch(e5){}" +
+                "try{" +
+                "for(i=0;i<doc.pathItems.length;i++){" +
+                "item=doc.pathItems[i];" +
+                "try{k=keyOf(item.absoluteZOrderPosition,item.typename);}catch(e6){continue;}" +
+                "if(wanted[k]&&!found[k])found[k]=item;" +
+                "}" +
+                "}catch(e7){}" +
+                "for(i=0;i<keys.length;i++){" +
+                "k=keyOf(keys[i].z,keys[i].t);" +
+                "result.push(found[k]||null);" +
+                "}" +
+                "return result;" +
+                "}" +
+                "var dest=findDest();" +
+                "var keys=[" + keys.join(",") + "];" +
+                "var sources=collectSources(keys);" +
+                "var selectionFallback=[];" +
+                "try{for(var si=0;si<doc.selection.length;si++)selectionFallback.push(doc.selection[si]);}catch(eSel){}" +
                 "var color=new RGBColor();" +
                 "color.red=" + settings.r + ";color.green=" + settings.g + ";color.blue=" + settings.b + ";" +
                 "var overlayOpacity=" + settings.opacity + ";" +
-                "var made=[],failed=0,lastError='';" +
+                "var made=[],failed=0,lastError='',fallbackIndex=0;" +
                 "var i,src,b,w,h,top,left,rect;" +
                 "for(i=0;i<sources.length;i++){" +
                 "try{" +
                 "src=sources[i];" +
+                "if(!src&&fallbackIndex<selectionFallback.length){src=selectionFallback[fallbackIndex++];}" +
+                "if(!src){failed++;lastError='対象が見つかりません';continue;}" +
                 "try{b=src.visibleBounds;}catch(e8){b=src.geometricBounds;}" +
                 "w=Math.abs(b[2]-b[0]);h=Math.abs(b[1]-b[3]);" +
                 "if(w<=0||h<=0){failed++;continue;}" +
