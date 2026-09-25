@@ -961,27 +961,42 @@
                 .replace(/\n/g, "\\n");
         }
 
-        function collectPickedKeys() {
-            var keys = [];
-            var i, entry;
+        function collectPickedBounds() {
+            var result = [];
+            var i, entry, b;
+
             for (i = 0; i < objectEntries.length; i++) {
                 entry = objectEntries[i];
                 if (!entry.selectable || !picked[entry.id]) continue;
-                if (entry.zOrder === null || entry.zOrder === undefined) continue;
-                keys.push(
-                    "{z:" + jsNumber(entry.zOrder) +
-                    ",t:\"" + entry.itemType + "\"}"
-                );
+                try {
+                    b = boundsOf(entry.ref);
+                    if (b.width <= 0 || b.height <= 0) continue;
+                    result.push({
+                        left: b.left,
+                        top: b.top,
+                        right: b.right,
+                        bottom: b.bottom
+                    });
+                } catch (_) {}
             }
-            return keys;
+            return result;
         }
 
         function buildExecuteScript(destInfo, settings) {
-            var keys = collectPickedKeys();
-            var destType, destName, destZ;
+            var bounds = collectPickedBounds();
+            var boundsCode = [];
+            var destType, destName, destZ, i, b;
 
-            if (keys.length === 0) {
-                return "alert('対象オブジェクトを特定できません。');";
+            if (bounds.length === 0) {
+                return "alert('対象オブジェクトの表示領域を取得できません。');";
+            }
+
+            for (i = 0; i < bounds.length; i++) {
+                b = bounds[i];
+                boundsCode.push(
+                    "[" + jsNumber(b.left) + "," + jsNumber(b.top) + "," +
+                    jsNumber(b.right) + "," + jsNumber(b.bottom) + "]"
+                );
             }
 
             destType = destInfo.type || "Layer";
@@ -1025,40 +1040,16 @@
                 "}" +
                 "return doc.activeLayer;" +
                 "}" +
-                "function keyOf(z,t){return t+'#'+z;}" +
-                "function collectSources(keys){" +
-                "var wanted={},found={},result=[],i,item,k;" +
-                "for(i=0;i<keys.length;i++)wanted[keyOf(keys[i].z,keys[i].t)]=i;" +
-                "try{" +
-                "for(i=0;i<doc.pageItems.length;i++){" +
-                "item=doc.pageItems[i];" +
-                "try{k=keyOf(item.absoluteZOrderPosition,item.typename);}catch(e4){continue;}" +
-                "if(wanted[k]!==undefined&&!found[k]){found[k]=item;}" +
-                "}" +
-                "}catch(e5){}" +
-                "try{" +
-                "for(i=0;i<doc.pathItems.length;i++){" +
-                "item=doc.pathItems[i];" +
-                "try{k=keyOf(item.absoluteZOrderPosition,item.typename);}catch(e6){continue;}" +
-                "if(wanted[k]!==undefined&&!found[k]){found[k]=item;}" +
-                "}" +
-                "}catch(e7){}" +
-                "for(i=0;i<keys.length;i++){k=keyOf(keys[i].z,keys[i].t);result.push(found[k]||null);}" +
-                "return result;" +
-                "}" +
                 "var dest=findDest();" +
-                "var keys=[" + keys.join(",") + "];" +
+                "var bounds=[" + boundsCode.join(",") + "];" +
                 "var color=new RGBColor();" +
                 "color.red=" + settings.r + ";color.green=" + settings.g + ";color.blue=" + settings.b + ";" +
                 "var overlayOpacity=" + settings.opacity + ";" +
-                "var sources=collectSources(keys);" +
                 "var made=[],failed=0,lastError='';" +
-                "var i,src,b,w,h,top,left,rect;" +
-                "for(i=0;i<keys.length;i++){" +
+                "var i,b,w,h,top,left,rect;" +
+                "for(i=0;i<bounds.length;i++){" +
                 "try{" +
-                "src=sources[i];" +
-                "if(!src){failed++;lastError='対象が見つかりません';continue;}" +
-                "try{b=src.geometricBounds;}catch(e9){b=src.visibleBounds;}" +
+                "b=bounds[i];" +
                 "w=Math.abs(b[2]-b[0]);h=Math.abs(b[1]-b[3]);" +
                 "if(w<=0||h<=0){failed++;continue;}" +
                 "top=b[1]>b[3]?b[1]:b[3];left=b[0]<b[2]?b[0]:b[2];" +
@@ -1071,7 +1062,8 @@
                 "rect.stroked=false;rect.filled=true;" +
                 "try{rect.fillColor=color;}catch(e12){}" +
                 "try{rect.opacity=overlayOpacity;}catch(eOpacity){}" +
-                "rect.name='グリーンオーバーレイ';" +
+                "rect.name='オーバーレイ';" +
+                "try{rect.zOrder(ZOrderMethod.BRINGTOFRONT);}catch(eZ){}" +
                 "made.push(rect);" +
                 "}catch(e13){failed++;lastError=String(e13);}" +
                 "}" +
