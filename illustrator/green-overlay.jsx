@@ -407,9 +407,6 @@
 
             if (entry.children.length > 0) {
                 marker = entry.expanded ? "▼ " : "▶ ";
-                check = descendantSelectionState(entry) === 2
-                    ? "☑ "
-                    : (descendantSelectionState(entry) === 1 ? "◩ " : "☐ ");
             } else {
                 marker = "  ";
             }
@@ -494,11 +491,6 @@
         var countText = toolbar.add("statictext", undefined, "0件選択");
         countText.characters = 16;
 
-        var branchMode = toolbar.add("dropdownlist", undefined, [
-            "行クリック: 開閉",
-            "行クリック: 配下選択"
-        ]);
-        branchMode.selection = 0;
 
         /*
           TreeView は onClick が来ない。ネイティブ複数選択は Ctrl/Cmd 必須。
@@ -775,6 +767,20 @@
                     row = objectList.add("item", objectRowText(entry));
                     objectRows[row.index] = entry;
                     entry.ui = row;
+
+                    if (entry.children.length > 0 && entry.expanded) {
+                        row = objectList.add(
+                            "item",
+                            indentText(entry.depth + 1) +
+                            (descendantSelectionState(entry) === 2 ? "☑ " :
+                                (descendantSelectionState(entry) === 1 ? "◩ " : "☐ ")) +
+                            "配下を全選択 / 全解除"
+                        );
+                        objectRows[row.index] = {
+                            descendantToggle: true,
+                            parentEntry: entry
+                        };
+                    }
                 }
             } finally {
                 suppressObjectEvent--;
@@ -782,11 +788,22 @@
         }
 
         function refreshVisibleObjectRows() {
-            var i, entry;
+            var i, entry, row, state;
             for (i = 0; i < objectRows.length; i++) {
                 entry = objectRows[i];
                 try {
-                    if (entry.ui) entry.ui.text = objectRowText(entry);
+                    row = objectList.items[i];
+                    if (entry.descendantToggle) {
+                        state = descendantSelectionState(entry.parentEntry);
+                        if (row) {
+                            row.text =
+                                indentText(entry.parentEntry.depth + 1) +
+                                (state === 2 ? "☑ " : (state === 1 ? "◩ " : "☐ ")) +
+                                "配下を全選択 / 全解除";
+                        }
+                    } else if (entry.ui) {
+                        entry.ui.text = objectRowText(entry);
+                    }
                 } catch (_) {}
             }
         }
@@ -843,6 +860,22 @@
                 }
 
 
+                if (entry.descendantToggle) {
+                    var parentEntry = entry.parentEntry;
+                    var turnOn = descendantSelectionState(parentEntry) !== 2;
+                    setDescendantsPicked(parentEntry, turnOn);
+                    refreshVisibleObjectRows();
+                    updateCountAndInfo(null);
+                    statusText.text = turnOn
+                        ? "配下をすべて選択しました。"
+                        : "配下をすべて解除しました。";
+                    suppressObjectEvent++;
+                    try { objectList.selection = null; } catch (_) {}
+                    suppressObjectEvent--;
+                    inObjectListHandler = false;
+                    return;
+                }
+
                 if (entry.selectable) {
                     picked[entry.id] = !picked[entry.id];
                     row.text = objectRowText(entry);
@@ -861,32 +894,19 @@
                     return;
                 }
 
-                if (branchMode.selection && branchMode.selection.index === 1) {
-                    var turnOn = descendantSelectionState(entry) !== 2;
-                    setDescendantsPicked(entry, turnOn);
-                    refreshVisibleObjectRows();
-                    updateCountAndInfo(null);
-                    statusText.text = turnOn
-                        ? "この階層をすべて選択しました。"
-                        : "この階層をすべて解除しました。";
-                } else {
-                    entry.expanded = !entry.expanded;
-                    suppressObjectEvent++;
-                    try {
-                        paintObjectList();
-                    } catch (_) {
-                    } finally {
-                        suppressObjectEvent--;
-                    }
-                    statusText.text = entry.expanded
-                        ? "階層を開きました。"
-                        : "階層を閉じました。";
-                }
-
+                entry.expanded = !entry.expanded;
                 suppressObjectEvent++;
-                try { objectList.selection = null; } catch (_) {}
-                suppressObjectEvent--;
-                inObjectListHandler = false;
+                try {
+                    paintObjectList();
+                    objectList.selection = null;
+                } catch (_) {
+                } finally {
+                    suppressObjectEvent--;
+                    inObjectListHandler = false;
+                }
+                statusText.text = entry.expanded
+                    ? "階層を開きました。"
+                    : "階層を閉じました。";
             } catch (e) {
                 inObjectListHandler = false;
                 showError(e);
@@ -1126,7 +1146,10 @@
         w.onClose = function () {
             try {
                 $.global.__greenOverlayWindow = null;
+                try { w.hide(); } catch (_) {}
+                try { w.close(); } catch (_) {}
             } catch (_) {}
+            return true;
         };
 
         rebuildTrees();
