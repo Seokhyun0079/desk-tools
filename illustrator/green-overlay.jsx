@@ -413,9 +413,27 @@
         var intro = w.add(
             "statictext",
             undefined,
-            "対象を複数選択し、同じ位置・サイズに緑色の矩形を作成します。"
+            "対象を複数選択し、同じ位置・サイズに矩形を作成します。"
         );
         intro.characters = 58;
+
+        var appearancePanel = w.add("panel", undefined, "オーバーレイ設定");
+        appearancePanel.orientation = "row";
+        appearancePanel.alignChildren = ["left", "center"];
+        appearancePanel.margins = 8;
+
+        appearancePanel.add("statictext", undefined, "R");
+        var redInput = appearancePanel.add("edittext", undefined, "0");
+        redInput.characters = 4;
+        appearancePanel.add("statictext", undefined, "G");
+        var greenInput = appearancePanel.add("edittext", undefined, "255");
+        greenInput.characters = 4;
+        appearancePanel.add("statictext", undefined, "B");
+        var blueInput = appearancePanel.add("edittext", undefined, "0");
+        blueInput.characters = 4;
+        appearancePanel.add("statictext", undefined, "不透明度 %");
+        var opacityInput = appearancePanel.add("edittext", undefined, "100");
+        opacityInput.characters = 4;
 
         var destinationPanel = w.add("panel", undefined, "作成先");
         destinationPanel.orientation = "column";
@@ -472,6 +490,27 @@
 
         var runButton = bottom.add("button", undefined, "確認 / 実行");
         runButton.enabled = false;
+
+        function clampNumber(value, minValue, maxValue) {
+            var n = Number(value);
+            if (isNaN(n)) return null;
+            if (n < minValue) n = minValue;
+            if (n > maxValue) n = maxValue;
+            return Math.round(n);
+        }
+
+        function overlaySettings() {
+            var r = clampNumber(redInput.text, 0, 255);
+            var g = clampNumber(greenInput.text, 0, 255);
+            var b = clampNumber(blueInput.text, 0, 255);
+            var opacity = clampNumber(opacityInput.text, 0, 100);
+            if (r === null || g === null || b === null || opacity === null) return null;
+            redInput.text = String(r);
+            greenInput.text = String(g);
+            blueInput.text = String(b);
+            opacityInput.text = String(opacity);
+            return { r: r, g: g, b: b, opacity: opacity };
+        }
 
         function selectedCount() {
             var count = 0;
@@ -740,11 +779,12 @@
             }
         };
 
-        function handleObjectListEvent() {
+        function handleObjectListEvent(fromClick) {
             try {
                 var row, entry, i;
 
                 if (suppressObjectEvent > 0 || inObjectListHandler) return;
+                if (!fromClick) return;
                 inObjectListHandler = true;
 
                 row = objectList.selection;
@@ -796,8 +836,8 @@
             }
         }
 
-        objectList.onClick = handleObjectListEvent;
-        objectList.onChange = handleObjectListEvent;
+        objectList.onClick = function () { handleObjectListEvent(true); };
+        objectList.onChange = function () { handleObjectListEvent(false); };
 
         selectAllButton.onClick = function () {
             try {
@@ -859,7 +899,7 @@
             return keys;
         }
 
-        function buildExecuteScript(destInfo) {
+        function buildExecuteScript(destInfo, settings) {
             var keys = collectPickedKeys();
             var destType, destName, destZ;
 
@@ -931,13 +971,9 @@
                 "}" +
                 "var dest=findDest();" +
                 "var keys=[" + keys.join(",") + "];" +
-                "var color=null;" +
-                "try{" +
-                "if(doc.documentColorSpace===DocumentColorSpace.CMYK){" +
-                "color=new CMYKColor();color.cyan=75;color.magenta=0;color.yellow=80;color.black=0;" +
-                "}" +
-                "}catch(e8){}" +
-                "if(!color){color=new RGBColor();color.red=0;color.green=200;color.blue=70;}" +
+                "var color=new RGBColor();" +
+                "color.red=" + settings.r + ";color.green=" + settings.g + ";color.blue=" + settings.b + ";" +
+                "var overlayOpacity=" + settings.opacity + ";" +
                 "var sources=collectSources(keys);" +
                 "var made=[],failed=0,lastError='';" +
                 "var i,src,b,w,h,top,left,rect;" +
@@ -957,6 +993,7 @@
                 "}" +
                 "rect.stroked=false;rect.filled=true;" +
                 "try{rect.fillColor=color;}catch(e12){}" +
+                "try{rect.opacity=overlayOpacity;}catch(eOpacity){}" +
                 "rect.name='グリーンオーバーレイ';" +
                 "made.push(rect);" +
                 "}catch(e13){failed++;lastError=String(e13);}" +
@@ -996,6 +1033,12 @@
                     }
                 } catch (_) {}
 
+                var settings = overlaySettings();
+                if (!settings) {
+                    alert("RGB は 0〜255、不透明度は 0〜100 の数値で入力してください。");
+                    return;
+                }
+
                 var count = selectedCount();
                 if (!count) {
                     alert("対象オブジェクトを選択してください。");
@@ -1004,13 +1047,15 @@
 
                 if (!confirm(
                     count +
-                    "件のオブジェクト上に緑色の要素を作成します。\n" +
+                    "件のオブジェクト上に矩形を作成します。\n" +
+                    "RGB: " + settings.r + ", " + settings.g + ", " + settings.b +
+                    " / 不透明度: " + settings.opacity + "%\n" +
                     "実行しますか？"
                 )) {
                     return;
                 }
 
-                sendBridgeTalk(buildExecuteScript(destInfo));
+                sendBridgeTalk(buildExecuteScript(destInfo, settings));
                 statusText.text = "作成を実行しました。";
             } catch (e) {
                 showError(e);
