@@ -779,12 +779,11 @@
             }
         };
 
-        function handleObjectListEvent(fromClick) {
+        function handleObjectListEvent() {
             try {
                 var row, entry, i;
 
                 if (suppressObjectEvent > 0 || inObjectListHandler) return;
-                if (!fromClick) return;
                 inObjectListHandler = true;
 
                 row = objectList.selection;
@@ -805,6 +804,9 @@
                     updateCountAndInfo(entry.ref);
                     try { applyIllustratorSelection(entry); } catch (_) {}
                     requestCanvasFollow(entry);
+                    suppressObjectEvent++;
+                    try { objectList.selection = null; } catch (_) {}
+                    suppressObjectEvent--;
                     inObjectListHandler = false;
                     return;
                 }
@@ -819,12 +821,7 @@
                 suppressObjectEvent++;
                 try {
                     paintObjectList();
-                    for (i = 0; i < objectRows.length; i++) {
-                        if (objectRows[i].id === entry.id) {
-                            objectList.selection = i;
-                            break;
-                        }
-                    }
+                    objectList.selection = null;
                 } catch (_) {
                 } finally {
                     suppressObjectEvent--;
@@ -836,8 +833,8 @@
             }
         }
 
-        objectList.onClick = function () { handleObjectListEvent(true); };
-        objectList.onChange = function () { handleObjectListEvent(false); };
+        objectList.onClick = null;
+        objectList.onChange = handleObjectListEvent;
 
         selectAllButton.onClick = function () {
             try {
