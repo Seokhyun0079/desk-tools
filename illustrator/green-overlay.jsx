@@ -422,12 +422,6 @@
                 entry.label + "  [" + kindLabel(entry.ref) + "]";
         }
 
-        function groupToggleRowText(entry) {
-            var state = descendantSelectionState(entry);
-            var check = state === 2 ? "☑ " : (state === 1 ? "◩ " : "☐ ");
-            return indentText(entry.depth + 1) + "  " + check + "この階層を全選択 / 全解除";
-        }
-
         function setDescendantsPicked(entry, value) {
             var i, child;
             for (i = 0; i < entry.children.length; i++) {
@@ -775,14 +769,6 @@
                     row = objectList.add("item", objectRowText(entry));
                     objectRows[row.index] = entry;
                     entry.ui = row;
-
-                    if (entry.children.length > 0 && entry.expanded) {
-                        row = objectList.add("item", groupToggleRowText(entry));
-                        objectRows[row.index] = {
-                            groupToggle: true,
-                            parentEntry: entry
-                        };
-                    }
                 }
             } finally {
                 suppressObjectEvent--;
@@ -790,16 +776,11 @@
         }
 
         function refreshVisibleObjectRows() {
-            var i, entry, row;
+            var i, entry;
             for (i = 0; i < objectRows.length; i++) {
                 entry = objectRows[i];
                 try {
-                    row = objectList.items[i];
-                    if (entry.groupToggle) {
-                        if (row) row.text = groupToggleRowText(entry.parentEntry);
-                    } else if (entry.ui) {
-                        entry.ui.text = objectRowText(entry);
-                    }
+                    if (entry.ui) entry.ui.text = objectRowText(entry);
                 } catch (_) {}
             }
         }
@@ -855,21 +836,6 @@
                     return;
                 }
 
-                if (entry.groupToggle) {
-                    var parentEntry = entry.parentEntry;
-                    var turnOn = descendantSelectionState(parentEntry) !== 2;
-                    setDescendantsPicked(parentEntry, turnOn);
-                    refreshVisibleObjectRows();
-                    updateCountAndInfo(null);
-                    statusText.text = turnOn
-                        ? "この階層をすべて選択しました。"
-                        : "この階層をすべて解除しました。";
-                    suppressObjectEvent++;
-                    try { objectList.selection = null; } catch (_) {}
-                    suppressObjectEvent--;
-                    inObjectListHandler = false;
-                    return;
-                }
 
                 if (entry.selectable) {
                     picked[entry.id] = !picked[entry.id];
@@ -889,6 +855,14 @@
                     return;
                 }
 
+                if (entry.expanded) {
+                    var turnOn = descendantSelectionState(entry) !== 2;
+                    setDescendantsPicked(entry, turnOn);
+                    statusText.text = turnOn
+                        ? "この階層をすべて選択しました。"
+                        : "この階層をすべて解除しました。";
+                    updateCountAndInfo(null);
+                }
                 entry.expanded = !entry.expanded;
 
                 suppressObjectEvent++;
