@@ -15,7 +15,7 @@ const group=container('GroupItem',[nested]);
 const layer=container('Layer',[group]);
 const doc={typename:'Document',layers:[layer],views:[{zoom:1}],pageItems:leaves,pathItems:leaves,activeLayer:layer,selection:[]};
 doc.pathItems.rectangle = () => { throw Error('locked destination'); };
-const controls=[], logs=[], alerts=[], bodies=[];
+const controls=[], logs=[], alerts=[], bodies=[], pending=[];
 function control(type,text) {
     const c={type,text,items:[],selection:null,layout:{resize(){},layout(){}},
         add(type,a,b){const child=control(type,b===undefined?a:b);child.index=this.items.length;this.items.push(child);return child;},
@@ -27,8 +27,20 @@ const context={app:{documents:[doc],activeDocument:doc,coordinateSystem:0,redraw
     Folder:{userData:{fsName:'/mock'}},File,$:{global:{}},Window:function(){return control('window');},
     RGBColor:function(){}, ElementPlacement:{PLACEATBEGINNING:1},ZOrderMethod:{BRINGTOFRONT:1},
     alert:s=>alerts.push(s),confirm:()=>true,
-    BridgeTalk:function(){this.send=()=>{bodies.push(this.body);return true;};}};
+    BridgeTalk:function(){this.send=()=>{bodies.push(this.body); if(this.body.indexOf("__greenOverlayLoadStep")>=0) pending.push(this); return true;};}};
 vm.runInNewContext(source,context);
+assert(shown,'window must show before work');
+assert.equal(reads,0,'no initial scan');
+assert.equal(pending.length,1);
+let batches=0;
+while(pending.length){
+    const bt=pending.shift();
+    vm.runInNewContext(bt.body.replace(/^#target.*$/gm,''),context);
+    batches++;
+    if(bt.onResult) bt.onResult({body:''});
+    assert(batches<1000,'loader terminates');
+}
+assert(batches>30,'large document is split across messages');
 assert.equal(reads,3,'one scan per container, no leaf scans');
 const trees=controls.filter(c=>c.type==='treeview');
 assert.equal(trees.length,2,'both lists use native arrows');
@@ -72,3 +84,16 @@ assert(alerts.at(-1).includes('1000件は作成できませんでした。'));
 controls.find(c=>c.text==='全解除').onClick();
 assert(controls.some(c=>c.text==='0件選択'));
 console.log('Passed: native trees, single container scan, native disclosure isolation, subtree and repeated leaf toggles, settings and host failure logs');
+
+// Cancellation must invalidate queued work and prevent further scheduling.
+const context2={...context, $:{global:{}}};
+vm.runInNewContext(source,context2);
+const cancel=controls.filter(c=>c.text==='読み込みを中止').at(-1);
+cancel.onClick();
+const queued=pending.shift();
+const before=reads;
+vm.runInNewContext(queued.body.replace(/^#target.*$/gm,''),context2);
+queued.onResult({body:''});
+assert.equal(reads,before);
+assert.equal(pending.length,0);
+console.log('Passed: window-first loading, bounded queued batches and cancellation');

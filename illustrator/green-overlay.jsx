@@ -218,7 +218,8 @@
                 return false;
             }
             try {
-                if (a.absoluteZOrderPosition === b.absoluteZOrderPosition) return true;
+                var az = a.absoluteZOrderPosition, bz = b.absoluteZOrderPosition;
+                if (typeof az === "number" && typeof bz === "number" && az === bz) return true;
             } catch (_) {}
             return false;
         }
@@ -540,6 +541,7 @@
         var statusText = bottom.add("statictext", undefined, "準備完了");
         statusText.alignment = ["fill", "center"];
 
+        var cancelLoadButton = bottom.add("button", undefined, "読み込みを中止");
         var runButton = bottom.add("button", undefined, "確認 / 実行");
         runButton.enabled = false;
 
@@ -779,25 +781,160 @@
             }
         }
 
+        var loading = false;
+        var loadToken = String(new Date().getTime()) + ":" + Math.random();
+        var scanJobs = [], uiJobs = [], ticks = 0, scanned = 0;
+        var typedProps = ["groupItems", "compoundPathItems", "pathItems", "textFrames", "placedItems", "rasterItems", "symbolItems", "meshItems", "pluginItems", "graphItems", "nonNativeItems", "legacyTextItems"];
+
+        function enableLists(value) {
+            destinationTree.enabled = objectList.enabled = value;
+            selectAllButton.enabled = clearButton.enabled = value;
+            runButton.enabled = false;
+            cancelLoadButton.enabled = !value;
+        }
+
+        function scanJob(ref, depth, out) {
+            var t = typeOf(ref);
+            var props = t === "Document" ? ["layers"] :
+                (t === "CompoundPathItem" ? ["pathItems"] :
+                    (t === "Layer" ? ["layers", "pageItems"] : ["pageItems"]));
+            return {ref: ref, depth: depth, out: out, props: props, prop: 0,
+                col: null, index: 0, length: 0, refs: [], seen: {}, counts: {}, stage: 0, build: 0};
+        }
+
+        function queueLoadStep() {
+            if (!loading) return;
+            var bt = new BridgeTalk();
+            bt.target = BridgeTalk.appSpecifier || "illustrator";
+            bt.body = '#targetengine "greenOverlayEngine"\n' +
+                '$.global.__greenOverlayLoadStep("' + jsString(loadToken) + '");';
+            bt.onResult = function () { if (loading) queueLoadStep(); };
+            bt.onError = function (message) { stopLoading("読み込みに失敗しました。", message.body); };
+            if (!bt.send()) stopLoading("読み込みを開始できませんでした。", "BridgeTalk send failed");
+        }
+
+        function stopLoading(message, error) {
+            loading = false;
+            enableLists(false);
+            cancelLoadButton.enabled = false;
+            statusText.text = message;
+            logEvent(error ? "startup.failed" : "startup.cancelled", error || "User cancelled");
+        }
+
+        cancelLoadButton.onClick = function () { stopLoading("読み込みを中止しました。再実行してください。"); };
+
+        function readOne(job) {
+            if (job.prop < job.props.length) {
+                var prop = job.props[job.prop];
+                if (!job.col) {
+                    try { job.col = job.ref[prop]; job.length = job.col ? job.col.length : 0; }
+                    catch (e) { logEvent("children." + prop, e, job.ref); job.length = 0; }
+                }
+                if (job.index < job.length) {
+                    try {
+                        var item = job.col[job.index++];
+                        if (prop === "layers" || typeOf(job.ref) === "CompoundPathItem" || job.stage >= 2 || isDirectChild(item, job.ref)) {
+                            pushUnique(job.refs, job.seen, item);
+                        }
+                        scanned++;
+                    } catch (e) { logEvent("children.item", e, job.ref); }
+                    return false;
+                }
+                job.prop++; job.col = null; job.index = 0;
+                return false;
+            }
+            // Retain the branch's typed-collection fallback for unusual host objects.
+            if (job.stage < 2 && typeOf(job.ref) !== "Document" && typeOf(job.ref) !== "CompoundPathItem" && artItemCount(job.refs) === 0) {
+                job.stage++; job.props = typedProps; job.prop = 0;
+                return false;
+            }
+            if (!job.sorted) {
+                sortByStack(job.refs); job.sorted = true;
+            }
+            if (job.build < job.refs.length) {
+                var ref = job.refs[job.build++], structural = isStructuralContainer(ref);
+                var entry = {id: objectEntries.length, ref: ref, depth: job.depth,
+                    selectable: !structural, expanded: false, children: [], childrenLoaded: true,
+                    label: labeledName(ref, job.counts), zOrder: zOrderOf(ref), itemType: typeOf(ref)};
+                objectEntries.push(entry); job.out.push(entry);
+                if (structural) scanJobs.unshift(scanJob(ref, job.depth + 1, entry.children));
+                return false;
+            }
+            return true;
+        }
+
+        function drawOne(job) {
+            var entry = job.entry;
+            var node = job.objectParent.add(entry.children.length ? "node" : "item", objectRowText(entry));
+            node._entry = entry; entry.ui = node;
+            objectRows.push({ui: node, entry: entry});
+            if (entry.children.length) {
+                var toggle = node.add("item", "☐ 配下を全選択 / 全解除");
+                toggle._entry = {descendantToggle: true, parentEntry: entry};
+                objectRows.push({ui: toggle, entry: toggle._entry});
+                node.expanded = false;
+            }
+            var destParent = job.destParent;
+            if (isDestination(entry.ref)) {
+                var hasDest = false;
+                for (var k = 0; k < entry.children.length; k++) {
+                    if (isDestination(entry.children[k].ref)) { hasDest = true; break; }
+                }
+                var dest = destParent.add(hasDest ? "node" : "item", entry.label + "  [" + kindLabel(entry.ref) + "]");
+                dest._destinationIndex = destinationRefs.length;
+                var info = {ref: entry.ref, z: entry.zOrder, type: entry.itemType, name: ""};
+                try { info.name = String(entry.ref.name); } catch (_) {}
+                destinationRefs.push(info); dest.expanded = false; destParent = dest;
+            }
+            for (var i = entry.children.length - 1; i >= 0; i--) {
+                uiJobs.push({entry: entry.children[i], objectParent: node, destParent: destParent});
+            }
+        }
+
+        $.global.__greenOverlayLoadStep = function (token) {
+            if (!loading || token !== loadToken) return;
+            try {
+                if (!app.documents.length || !sameItem(app.activeDocument, doc)) {
+                    stopLoading("ドキュメントが変わりました。再実行してください。"); return;
+                }
+                var started = new Date().getTime(), units = 0;
+                while (units++ < 64 && new Date().getTime() - started < 20) {
+                    if (scanJobs.length) {
+                        var job = scanJobs[0];
+                        if (readOne(job)) {
+                            // Child jobs may have been prepended during the previous unit.
+                            scanJobs.shift();
+                        }
+                    } else {
+                        if (!uiStarted) {
+                            uiStarted = true;
+                            for (var i = objectRoots.length - 1; i >= 0; i--) {
+                                uiJobs.push({entry: objectRoots[i], objectParent: objectList, destParent: destinationTree});
+                            }
+                        }
+                        if (!uiJobs.length) {
+                            loading = false; enableLists(true); updateRunState();
+                            statusText.text = "準備完了";
+                            logEvent("startup.ready", "elapsedMs=" + (new Date().getTime() - sessionStarted) + " entries=" + objectEntries.length);
+                            return;
+                        }
+                        drawOne(uiJobs.pop());
+                    }
+                }
+                var frames = ["◐", "◓", "◑", "◒"];
+                statusText.text = frames[ticks++ % 4] + (uiStarted ? " 一覧を作成中… " : " 読み込み中… ") + objectEntries.length + "件 / 調査 " + scanned + "件";
+                w.update();
+            } catch (e) { stopLoading("読み込みに失敗しました。", e); showError(e); }
+        };
+        var uiStarted = false;
+
         function rebuildTrees() {
-            destinationRefs = [];
-            objectEntries = [];
-            objectRoots = [];
-            objectRows = [];
-            picked = {};
-
-            destinationTree.removeAll();
-            objectRoots = collectObjectBranch(doc, 0);
-            loadAllTargets(objectRoots);
-            addDestinationBranch(objectRoots, destinationTree);
-            paintObjectList();
-
-            countText.text = "0件選択";
-            infoText.text = "オブジェクトを選択してください。";
-            statusText.text = "準備完了";
-
-            updateRunState();
-            logEvent("startup.ready", "elapsedMs=" + (new Date().getTime() - sessionStarted) + " roots=" + objectRoots.length);
+            destinationRefs = []; objectEntries = []; objectRoots = []; objectRows = []; picked = {};
+            destinationTree.removeAll(); objectList.removeAll();
+            loading = true; enableLists(false);
+            scanJobs = [scanJob(doc, 0, objectRoots)]; uiJobs = []; uiStarted = false;
+            statusText.text = "読み込み中…";
+            queueLoadStep();
         }
 
         destinationTree.onChange = function () {
@@ -1128,6 +1265,7 @@
 
         w.onClose = function () {
             try {
+                loading = false;
                 $.global.__greenOverlayWindow = null;
                 try { w.hide(); } catch (_) {}
                 try { w.close(); } catch (_) {}
@@ -1135,9 +1273,11 @@
             return true;
         };
 
-        rebuildTrees();
+        enableLists(false);
         try { w.layout.layout(true); } catch (e) { logEvent("ui.layout", e); }
         w.show();
+        w.update();
+        rebuildTrees();
 
     } catch (e) {
         showError(e);
