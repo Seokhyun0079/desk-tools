@@ -122,3 +122,34 @@ assert(latestList.items[0].items.length>1);
 assert(logs.some(line=>line.includes('bridgetalk.load')));
 assert(logs.some(line=>line.includes('startup.ready')));
 console.log('Passed: BridgeTalk load failure falls back inside the palette engine');
+
+// A later activeDocument read throws for a file that is already open.
+let activeHits = 0;
+const flakyApp = Object.create(context.app);
+Object.defineProperty(flakyApp, 'activeDocument', {
+    get() {
+        activeHits += 1;
+        if (activeHits > 1) throw new Error('This is not a document');
+        return context.app.activeDocument;
+    }
+});
+const readsBeforeFlaky = reads, alertsBeforeFlaky = alerts.length;
+const readyBeforeFlaky = logs.filter(line => line.includes('startup.ready')).length;
+const context4 = {...context, $:{global:{}}, app: flakyApp};
+vm.runInNewContext(source, context4);
+assert.equal(reads, readsBeforeFlaky);
+assert(activeHits >= 1);
+while (pending.length) {
+    const bt = pending.shift();
+    vm.runInNewContext(bt.body, {$:{global:{}}});
+    if (bt.onResult) bt.onResult({body:'ok'});
+    assert(pending.length < 1000, 'flaky document load terminates');
+}
+assert.equal(reads, readsBeforeFlaky + 3);
+assert.equal(alerts.length, alertsBeforeFlaky);
+assert(logs.filter(line => line.includes('startup.ready')).length > readyBeforeFlaky);
+assert(logs.some(line => line.includes('startup.document') && line.includes('not a document')));
+const flakyList = controls.filter(c => c.type === 'treeview').at(-1);
+assert.equal(flakyList.enabled, true);
+assert(flakyList.items[0].items.length > 1);
+console.log('Passed: open document survives activeDocument probe failure');

@@ -924,10 +924,52 @@
             }
         }
 
+        var notedDocumentProbe = false;
+
+        // Re-reading app.activeDocument from a palette callback throws
+        // "This is not a document" for a file that is open. Keep the document
+        // captured at startup unless Illustrator reports that nothing is open.
+        function capturedDocumentClosed(target) {
+            var count, i, targetName, activeName;
+            try {
+                count = app.documents.length;
+            } catch (e) {
+                if (!notedDocumentProbe) {
+                    notedDocumentProbe = true;
+                    logEvent("startup.document", e);
+                }
+                return false;
+            }
+            if (!count) return true;
+            try {
+                targetName = String(target.name);
+                activeName = String(app.activeDocument.name);
+            } catch (e) {
+                if (!notedDocumentProbe) {
+                    notedDocumentProbe = true;
+                    logEvent("startup.document", e);
+                }
+                return false;
+            }
+            if (activeName === targetName) return false;
+            for (i = 0; i < count; i++) {
+                try {
+                    if (String(app.documents[i].name) === targetName) return false;
+                } catch (e) {
+                    if (!notedDocumentProbe) {
+                        notedDocumentProbe = true;
+                        logEvent("startup.document", e);
+                    }
+                    return false;
+                }
+            }
+            return true;
+        }
+
         function loadStep(token) {
             if (!loading || token !== loadToken) return;
             try {
-                if (!app.documents.length || !sameItem(app.activeDocument, doc)) {
+                if (capturedDocumentClosed(doc)) {
                     stopLoading("ドキュメントが変わりました。再実行してください。"); return;
                 }
                 var started = new Date().getTime(), units = 0;
