@@ -802,41 +802,9 @@
                 col: null, index: 0, length: 0, refs: [], seen: {}, counts: {}, stage: 0, build: 0};
         }
 
-        // Illustrator does not apply #targetengine to a BridgeTalk body, so the body
-        // runs in the default engine and cannot see palette functions. Calling
-        // $.global.__greenOverlayLoadStep from the body failed the same way execute once did.
-        // The body only yields. onResult continues in the engine that owns the palette.
-        var loadPump = 0;
-
-        function queueLoadStep() {
-            if (!loading) return;
-            var pump = ++loadPump;
-            var bt = new BridgeTalk();
-            try {
-                bt.target = BridgeTalk.appSpecifier || "illustrator";
-            } catch (_) {
-                bt.target = "illustrator";
-            }
-            bt.body = "'ok';";
-            bt.onResult = function () {
-                if (pump !== loadPump || !loading) return;
-                loadStep(loadToken);
-                if (loading) queueLoadStep();
-            };
-            bt.onError = function (message) {
-                if (pump !== loadPump || !loading) return;
-                var detail = message && message.body !== undefined ? message.body : message;
-                logEvent("bridgetalk.load", detail);
-                loadPump++;
-                runLoadInline();
-            };
-            if (!bt.send()) {
-                logEvent("bridgetalk.load", "BridgeTalk send failed");
-                loadPump++;
-                runLoadInline();
-            }
-        }
-
+        // A BridgeTalk callback can run while the open file is temporarily "not a document".
+        // Layer reads there finish as an empty tree and the status still says ready.
+        // Read the hierarchy in this turn, after the window is visible.
         function runLoadInline() {
             try {
                 while (loading) loadStep(loadToken);
@@ -844,6 +812,39 @@
                 stopLoading("読み込みに失敗しました。", e);
                 showError(e);
             }
+        }
+
+        function relayout() {
+            try { w.layout.layout(true); } catch (e) { logEvent("ui.layout", e); }
+            try { destinationTree.layout.layout(true); } catch (_) {}
+            try { objectList.layout.layout(true); } catch (_) {}
+            try { w.update(); } catch (_) {}
+        }
+
+        function layerLength(target) {
+            try {
+                var layers = target.layers;
+                if (!layers || typeof layers.length !== "number") return -1;
+                return layers.length;
+            } catch (e) {
+                logEvent("children.layers", e, target);
+                return -1;
+            }
+        }
+
+        function useReadableDocument() {
+            if (layerLength(doc) > 0) return true;
+            try {
+                var active = app.activeDocument;
+                if (active && layerLength(active) > 0) {
+                    doc = active;
+                    logEvent("startup.document", "rebound");
+                    return true;
+                }
+            } catch (e) {
+                logEvent("startup.document", e);
+            }
+            return false;
         }
 
         function stopLoading(message, error) {
@@ -924,52 +925,18 @@
             }
         }
 
-        var notedDocumentProbe = false;
-
-        // Re-reading app.activeDocument from a palette callback throws
-        // "This is not a document" for a file that is open. Keep the document
-        // captured at startup unless Illustrator reports that nothing is open.
-        function capturedDocumentClosed(target) {
-            var count, i, targetName, activeName;
+        function capturedDocumentClosed() {
             try {
-                count = app.documents.length;
-            } catch (e) {
-                if (!notedDocumentProbe) {
-                    notedDocumentProbe = true;
-                    logEvent("startup.document", e);
-                }
+                return !app.documents.length;
+            } catch (_) {
                 return false;
             }
-            if (!count) return true;
-            try {
-                targetName = String(target.name);
-                activeName = String(app.activeDocument.name);
-            } catch (e) {
-                if (!notedDocumentProbe) {
-                    notedDocumentProbe = true;
-                    logEvent("startup.document", e);
-                }
-                return false;
-            }
-            if (activeName === targetName) return false;
-            for (i = 0; i < count; i++) {
-                try {
-                    if (String(app.documents[i].name) === targetName) return false;
-                } catch (e) {
-                    if (!notedDocumentProbe) {
-                        notedDocumentProbe = true;
-                        logEvent("startup.document", e);
-                    }
-                    return false;
-                }
-            }
-            return true;
         }
 
         function loadStep(token) {
             if (!loading || token !== loadToken) return;
             try {
-                if (capturedDocumentClosed(doc)) {
+                if (capturedDocumentClosed()) {
                     stopLoading("ドキュメントが変わりました。再実行してください。"); return;
                 }
                 var started = new Date().getTime(), units = 0;
@@ -989,8 +956,11 @@
                         }
                         if (!uiJobs.length) {
                             loading = false; enableLists(true); updateRunState();
-                            statusText.text = "準備完了";
-                            logEvent("startup.ready", "elapsedMs=" + (new Date().getTime() - sessionStarted) + " entries=" + objectEntries.length);
+                            relayout();
+                            statusText.text = objectRoots.length
+                                ? "準備完了"
+                                : "レイヤーを読み取れませんでした。再実行してください。";
+                            logEvent("startup.ready", "elapsedMs=" + (new Date().getTime() - sessionStarted) + " entries=" + objectEntries.length + " roots=" + objectRoots.length);
                             return;
                         }
                         drawOne(uiJobs.pop());
@@ -1007,9 +977,18 @@
             destinationRefs = []; objectEntries = []; objectRoots = []; objectRows = []; picked = {};
             destinationTree.removeAll(); objectList.removeAll();
             loading = true; enableLists(false);
+            if (!useReadableDocument()) {
+                loading = false;
+                enableLists(false);
+                cancelLoadButton.enabled = false;
+                statusText.text = "レイヤーを読み取れませんでした。再実行してください。";
+                logEvent("startup.failed", "No readable layers");
+                relayout();
+                return;
+            }
             scanJobs = [scanJob(doc, 0, objectRoots)]; uiJobs = []; uiStarted = false;
             statusText.text = "読み込み中…";
-            queueLoadStep();
+            runLoadInline();
         }
 
         destinationTree.onChange = function () {
