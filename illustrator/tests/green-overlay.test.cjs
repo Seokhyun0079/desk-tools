@@ -22,7 +22,7 @@ doc.pathItems.rectangle = () => { throw Error('locked destination'); };
 const controls=[], logs=[], alerts=[], bodies=[], pending=[];
 function control(type,text) {
     const c={type,text,items:[],selection:null,layout:{resize(){},layout(){}},
-        add(type,a,b){const child=control(type,b===undefined?a:b);child.index=this.items.length;this.items.push(child);return child;},
+        add(type,a,b){if(this.expanded===false) this.addedWhileCollapsed=true; const child=control(type,b===undefined?a:b);child.index=this.items.length;this.items.push(child);return child;},
         removeAll(){this.items=[];},show(){shown=true; readsAtShow=reads;},update(){},close(){},hide(){}};
     controls.push(c);return c;
 }
@@ -51,6 +51,7 @@ const layerNode=list.items[0], groupNode=layerNode.items[1], nestedNode=groupNod
 assert.equal(layerNode.type,'node');
 assert.equal(groupNode.type,'node');
 assert.equal(nestedNode.items.length,1001);
+assert(!controls.some(c=>c.addedWhileCollapsed),'children added to a collapsed node stay invisible');
 assert.equal(layerNode.expanded,false);
 assert.equal(tree.items[0].expanded,false);
 function clickRow(row){list.selection=row;list.onChange();}
@@ -106,3 +107,43 @@ assert(logs.some(line => line.includes('children.layers') && line.includes('not 
 assert(logs.some(line => line.includes('startup.document') && line.includes('rebound')));
 assert(logs.some(line => line.includes('roots=1')));
 console.log('Passed: unreadable document handle rebinds and shows layers');
+
+function art(type, name, extra) {
+    const item = Object.assign({typename:type, name:name, absoluteZOrderPosition:++z}, extra||{});
+    return item;
+}
+const clipPath = art('PathItem', '<Clip>', {clipping:true});
+const clippedArt = art('PathItem', 'inside');
+const mesh = art('MeshItem', 'mesh');
+const plain = art('PathItem', 'plain');
+function withKids(item, kids, extraCols) {
+    kids.forEach(child => { child.parent = item; });
+    Object.defineProperty(item, 'pageItems', {get(){ return kids; }});
+    Object.assign(item, extraCols||{});
+    return item;
+}
+const clipGroup = withKids(art('GroupItem', 'clips', {clipped:true, layers:[]}), [clippedArt], {
+    pathItems:[clipPath], meshItems:[], pluginItems:[], graphItems:[], nonNativeItems:[], legacyTextItems:[]
+});
+clipPath.parent = clipGroup;
+const hostLayer = withKids(art('Layer', 'Host', {layers:[]}), [clipGroup, plain], {
+    pathItems:[clipPath, clippedArt, plain], meshItems:[mesh], pluginItems:[], graphItems:[], nonNativeItems:[], legacyTextItems:[]
+});
+mesh.parent = hostLayer;
+const docMissing = {typename:'Document', name:'missing-types', layers:[hostLayer], views:[{zoom:1}], pageItems:[], pathItems:{rectangle(){throw Error('x');}}, selection:[], activeLayer:hostLayer};
+const contextMissing = {...context, $:{global:{}}, app:{...context.app, documents:[docMissing], activeDocument:docMissing}};
+vm.runInNewContext(source, contextMissing);
+const missingList = controls.filter(c => c.type==='treeview').at(-1);
+function entriesOf(node) {
+    return (node.items||[]).map(child => child._entry).filter(Boolean);
+}
+const hostNode = missingList.items[0];
+const hostEntries = entriesOf(hostNode).filter(entry => !entry.descendantToggle);
+assert(hostEntries.some(entry => entry.ref === mesh), 'mesh outside pageItems is listed');
+assert(!hostEntries.some(entry => entry.ref === clipPath), 'clipping path stays inside its group');
+const groupNodeMissing = hostEntries.find(entry => entry.ref === clipGroup).ui;
+const groupEntries = entriesOf(groupNodeMissing).filter(entry => !entry.descendantToggle);
+assert(groupEntries.some(entry => entry.ref === clippedArt));
+assert(groupEntries.some(entry => entry.ref === clipPath), 'clipping path omitted by pageItems is listed');
+assert(!controls.some(c => c.addedWhileCollapsed));
+console.log('Passed: clipping paths and meshes missing from pageItems are shown');
