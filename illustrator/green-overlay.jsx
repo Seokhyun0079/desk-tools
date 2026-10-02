@@ -2,12 +2,37 @@
 #targetengine "greenOverlayEngine"
 
 (function () {
+    var logFile = new File(Folder.userData.fsName + "/desk-tools/green-overlay.log");
+    var sessionStarted = new Date().getTime();
+    function logEvent(stage, error, item) {
+        try {
+            if (!logFile.parent.exists && !logFile.parent.create()) return false;
+            if (logFile.exists && logFile.length > 1024 * 1024) {
+                var previous = new File(logFile.fsName + ".1");
+                if (previous.exists) previous.remove();
+                if (!logFile.copy(previous.fsName)) return false;
+                logFile.remove();
+            }
+            logFile.encoding = "UTF-8";
+            if (!logFile.open("a")) return false;
+            try {
+                var detail = error ? String(error) : "";
+                if (error && error.line) detail += " line=" + error.line;
+                if (item) {
+                    try { detail += " type=" + item.typename; } catch (_) {}
+                }
+                logFile.writeln(new Date().toString() + " | " + stage + " | " + detail.replace(/[\r\n]+/g, " "));
+            } finally { logFile.close(); }
+            return true;
+        } catch (_) { return false; }
+    }
     function showError(e) {
+        var logged = logEvent("unhandled", e);
         var line = "";
         try {
             if (e && e.line) line = "\n行: " + e.line;
         } catch (_) {}
-        alert("スクリプトエラー\n" + e + line);
+        alert("スクリプトエラー\n" + e + line + (logged ? "\nログ: " + logFile.fsName : "\nログを保存できませんでした。"));
     }
 
     try {
@@ -82,46 +107,79 @@
 
         function directChildren(container) {
             var result = [];
-            var i, child;
+            var i, child, length;
             var t = typeOf(container);
 
             try {
                 if (t === "Document") {
-                    for (i = 0; i < container.layers.length; i++) {
+                    length = container.layers.length;
+                    for (i = 0; i < length; i++) {
                         result.push(container.layers[i]);
                     }
                 } else if (t === "Layer") {
-                    for (i = 0; i < container.pageItems.length; i++) {
+                    length = container.pageItems.length;
+                    for (i = 0; i < length; i++) {
                         child = container.pageItems[i];
                         try {
                             if (child.parent === container) result.push(child);
-                        } catch (_) {}
+                        } catch (e) { logEvent("children.parent", e, child); }
                     }
-                    for (i = 0; i < container.layers.length; i++) {
+                    length = container.layers.length;
+                    for (i = 0; i < length; i++) {
                         result.push(container.layers[i]);
                     }
                 } else if (t === "GroupItem") {
-                    for (i = 0; i < container.pageItems.length; i++) {
+                    length = container.pageItems.length;
+                    for (i = 0; i < length; i++) {
                         child = container.pageItems[i];
                         try {
                             if (child.parent === container) result.push(child);
-                        } catch (_) {}
+                        } catch (e) { logEvent("children.parent", e, child); }
                     }
                 } else if (t === "CompoundPathItem") {
-                    for (i = 0; i < container.pathItems.length; i++) {
+                    length = container.pathItems.length;
+                    for (i = 0; i < length; i++) {
                         child = container.pathItems[i];
                         try {
                             if (child.parent === container) result.push(child);
-                        } catch (_) {}
+                        } catch (e) { logEvent("children.parent", e, child); }
                     }
                 }
-            } catch (_) {}
+            } catch (e) { logEvent("children.read", e, container); throw e; }
 
             return result;
         }
 
-        function hasChildren(item) {
-            return directChildren(item).length > 0;
+        function isContainer(item) {
+            var t = typeOf(item);
+            return t === "Layer" || t === "GroupItem" || t === "CompoundPathItem";
+        }
+
+        // Shared model: host collections are read once, only when needed.
+        function makeRecord(item) {
+            var entry = {
+                id: objectEntries.length, ref: item,
+                selectable: isSelectableTarget(item), ui: null, children: null
+            };
+            objectEntries.push(entry);
+            return entry;
+        }
+
+        function childrenOf(entry) {
+            if (entry.children !== null) return entry.children;
+            var refs = directChildren(entry.ref);
+            var children = [];
+            for (var i = 0; i < refs.length; i++) children.push(makeRecord(refs[i]));
+            entry.children = children;
+            return children;
+        }
+
+        function visitTargets(entries, callback) {
+            for (var i = 0; i < entries.length; i++) {
+                var entry = entries[i];
+                if (entry.selectable) callback(entry);
+                if (isContainer(entry.ref)) visitTargets(childrenOf(entry), callback);
+            }
         }
 
         function isDestination(item) {
@@ -241,7 +299,8 @@
                         b.width.toFixed(2) + " × " +
                         b.height.toFixed(2) + " pt" +
                         " / 選択中: " + count + "件";
-                } catch (_) {
+                } catch (e) {
+                    logEvent("bounds.info", e, clickedItem);
                     infoText.text = count + "件のオブジェクトを選択中";
                 }
             } else {
@@ -264,7 +323,7 @@
 
                 try {
                     entry.ref.selected = true;
-                } catch (_) {}
+                } catch (e) { logEvent("selection.apply", e, entry.ref); }
             }
 
             try { app.redraw(); } catch (_) {}
@@ -284,69 +343,58 @@
 
                 app.redraw();
             } catch (e) {
+                logEvent("view.focus", e, item);
                 statusText.text = "表示位置を移動できませんでした。";
             }
         }
 
-        function addDestinationBranch(container, uiParent) {
-            var children = directChildren(container);
-            var i, item, node;
+        var rootEntries = [];
 
-            for (i = 0; i < children.length; i++) {
-                item = children[i];
-
-                if (!isDestination(item)) continue;
-
-                node = uiParent.add(
-                    "node",
-                    nameOf(item) + "  [" + kindLabel(item) + "]"
-                );
-                node._destinationIndex = destinationRefs.length;
-                destinationRefs.push(item);
-                node.expanded = false;
-
-                addDestinationBranch(item, node);
-            }
-        }
-
-        function addObjectBranch(container, uiParent) {
-            var children = directChildren(container);
-            var i, item, childList, node, entry;
-
-            for (i = 0; i < children.length; i++) {
-                item = children[i];
-                childList = directChildren(item);
-
-                entry = {
-                    id: objectEntries.length,
-                    ref: item,
-                    selectable: isSelectableTarget(item),
-                    ui: null
-                };
-                objectEntries.push(entry);
-
-                if (childList.length > 0) {
-                    node = uiParent.add("node", objectText(entry));
-                    node.expanded = false;
+        function addBranches(entries, uiParent, destinationMode) {
+            for (var i = 0; i < entries.length; i++) {
+                var entry = entries[i];
+                if (destinationMode && !isDestination(entry.ref)) continue;
+                var expandable = isContainer(entry.ref);
+                var node = uiParent.add(expandable ? "node" : "item",
+                    destinationMode ? nameOf(entry.ref) + "  [" + kindLabel(entry.ref) + "]" : objectText(entry));
+                node._record = entry;
+                node._loaded = !expandable;
+                if (destinationMode) {
+                    node._destinationIndex = destinationRefs.length;
+                    destinationRefs.push(entry.ref);
                 } else {
-                    node = uiParent.add("item", objectText(entry));
+                    node._entryId = entry.id;
+                    entry.ui = node;
                 }
-
-                node._entryId = entry.id;
-                entry.ui = node;
-
-                if (childList.length > 0) {
-                    addObjectBranch(item, node);
+                if (expandable) {
+                    node.add("item", "読み込み…");
+                    node.expanded = false;
                 }
             }
         }
+
+        function loadBranch(node, destinationMode) {
+            if (!node || node._loaded || !node._record) return;
+            try {
+                var children = childrenOf(node._record);
+                node.removeAll();
+                addBranches(children, node, destinationMode);
+                node._loaded = true;
+            } catch (e) {
+                logEvent("tree.expand", e, node._record.ref);
+                showError(e);
+            }
+        }
+
+        destinationTree.onExpand = function (node) { loadBranch(node, true); };
+        objectTree.onExpand = function (node) { loadBranch(node, false); };
 
         function refreshSelectionMarkers() {
             var i, entry;
             for (i = 0; i < objectEntries.length; i++) {
                 entry = objectEntries[i];
                 try {
-                    entry.ui.text = objectText(entry);
+                    if (entry.ui) entry.ui.text = objectText(entry);
                 } catch (_) {}
             }
         }
@@ -362,8 +410,12 @@
             destinationTree.removeAll();
             objectTree.removeAll();
 
-            addDestinationBranch(doc, destinationTree);
-            addObjectBranch(doc, objectTree);
+            rootEntries = [];
+            var layers = directChildren(doc);
+            for (var i = 0; i < layers.length; i++) rootEntries.push(makeRecord(layers[i]));
+            addBranches(rootEntries, destinationTree, true);
+            addBranches(rootEntries, objectTree, false);
+            logEvent("startup.ready", "elapsedMs=" + (new Date().getTime() - sessionStarted) + " roots=" + rootEntries.length);
 
             countText.text = "0件選択";
             infoText.text = "オブジェクトを選択してください。";
@@ -401,7 +453,7 @@
                     clicked.text = objectText(entry);
 
                     applyIllustratorSelection();
-                    focusItem(entry.ref);
+                    if (picked[entry.id]) focusItem(entry.ref);
                     updateCountAndInfo(entry.ref);
                 }
 
@@ -420,12 +472,7 @@
             try {
                 var i, entry;
 
-                for (i = 0; i < objectEntries.length; i++) {
-                    entry = objectEntries[i];
-                    if (entry.selectable) {
-                        picked[entry.id] = true;
-                    }
-                }
+                visitTargets(rootEntries, function (entry) { picked[entry.id] = true; });
 
                 refreshSelectionMarkers();
                 applyIllustratorSelection();
@@ -505,6 +552,7 @@
                             continue;
                         }
 
+                        rect = null;
                         try {
                             b = entry.ref.geometricBounds;
 
@@ -512,6 +560,7 @@
                             var height = Math.abs(b[1] - b[3]);
 
                             if (width <= 0 || height <= 0) {
+                                logEvent("overlay.bounds", "Non-positive bounds", entry.ref);
                                 failed++;
                                 continue;
                             }
@@ -528,7 +577,11 @@
                             rect.name = "グリーンオーバーレイ";
 
                             made.push(rect);
-                        } catch (_) {
+                        } catch (e) {
+                            logEvent("overlay.create", e, entry.ref);
+                            if (rect) {
+                                try { rect.remove(); } catch (cleanupError) { logEvent("overlay.cleanup", cleanupError); }
+                            }
                             failed++;
                         }
                     }

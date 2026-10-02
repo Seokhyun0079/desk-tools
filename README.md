@@ -28,3 +28,14 @@
 - 위쪽 트리는 생성 위치로 사용할 레이어/그룹만 표시합니다.
 - 아래쪽 트리는 레이어/그룹/오브젝트 계층을 표시하고, 실제 오브젝트 항목을 복수 선택합니다.
 - 실행 중 오류가 발생하면 오류 내용과 가능한 경우 줄 번호를 Illustrator 대화상자로 표시합니다.
+
+### 성능 및 실패 로그
+
+- 시작 시 최상위 레이어만 표시하고, 하위 계층은 펼칠 때 읽습니다. 두 트리는 읽은 계층 정보를 공유합니다.
+- `全選択`은 접힌 계층까지 읽어 모든 대상을 선택합니다. 큰 문서에서는 이 작업 자체에는 시간이 필요합니다.
+- 런타임 로그: ExtendScript `Folder.userData` 아래 `desk-tools/green-overlay.log`.
+  - 시작 소요 시간(`startup.ready`, `elapsedMs`), 계층 읽기, 선택 적용, 화면 이동, 크기 조회, 생성 실패의 단계·오류·가능한 줄 번호와 오브젝트 종류를 기록합니다.
+  - 1MB를 넘으면 이전 로그를 `.log.1`로 보관합니다. 문서 이름과 오브젝트 이름은 기록하지 않습니다.
+  - 처리되지 않은 오류 대화상자는 로그 경로 또는 저장 실패 여부를 표시합니다.
+- 재발 방지 기록: [`illustrator/failure-log.md`](illustrator/failure-log.md).
+- 자동 검증: `node illustrator/tests/green-overlay.test.cjs` (Illustrator/ScriptUI 모의 환경).
