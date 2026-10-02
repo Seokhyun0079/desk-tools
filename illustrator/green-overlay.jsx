@@ -2,12 +2,38 @@
 #targetengine "greenOverlayEngine"
 
 (function () {
+    var sessionStarted = new Date().getTime();
+    var logFile = new File(Folder.userData.fsName + "/desk-tools/green-overlay.log");
+    function logEvent(stage, error, item) {
+        try {
+            if (!logFile.parent.exists && !logFile.parent.create()) return false;
+            if (logFile.exists && logFile.length > 1024 * 1024) {
+                var previous = new File(logFile.fsName + ".1");
+                if (previous.exists) previous.remove();
+                if (!logFile.copy(previous.fsName)) return false;
+                logFile.remove();
+            }
+            logFile.encoding = "UTF-8";
+            if (!logFile.open("a")) return false;
+            try {
+                var detail = error ? String(error) : "";
+                if (error && error.line) detail += " line=" + error.line;
+                if (item) {
+                    try { detail += " type=" + item.typename; } catch (_) {}
+                }
+                logFile.writeln(new Date().toString() + " | " + stage + " | " + detail.replace(/[\r\n]+/g, " "));
+            } finally { logFile.close(); }
+            return true;
+        } catch (_) { return false; }
+    }
+
     function showError(e) {
+        var logged = logEvent("ui.error", e);
         var line = "";
         try {
             if (e && e.line) line = "\n行: " + e.line;
         } catch (_) {}
-        alert("スクリプトエラー\n" + e + line);
+        alert("スクリプトエラー\n" + e + line + (logged ? "\nログ: " + logFile.fsName : "\nログを保存できませんでした。"));
     }
 
     try {
@@ -243,17 +269,18 @@
         }
 
         function addCollectionItems(container, prop, result, seen, requireDirect) {
-            var col, i, item;
+            var col, i, item, length;
             try {
                 col = container[prop];
                 if (!col) return;
-                for (i = 0; i < col.length; i++) {
+                length = col.length;
+                for (i = 0; i < length; i++) {
                     item = col[i];
                     if (!requireDirect || isDirectChild(item, container)) {
                         pushUnique(result, seen, item);
                     }
                 }
-            } catch (_) {}
+            } catch (e) { logEvent("children." + prop, e, container); }
         }
 
         function addTypedChildren(container, result, seen, requireDirect) {
@@ -389,6 +416,9 @@
                     if (child.selectable) {
                         total++;
                         if (picked[child.id]) selected++;
+                    } else if (!child.childrenLoaded) {
+                        // Unknown descendants must not be treated as fully selected.
+                        total++;
                     } else if (child.children.length > 0) {
                         walk(child.children);
                     }
@@ -405,7 +435,7 @@
             var marker;
             var check = "";
 
-            if (entry.children.length > 0) {
+            if (!entry.childrenLoaded || entry.children.length > 0) {
                 marker = entry.expanded ? "▼ " : "▶ ";
             } else {
                 marker = "  ";
@@ -420,13 +450,14 @@
         }
 
         function setDescendantsPicked(entry, value) {
+            ensureObjectChildren(entry);
             var i, child;
             for (i = 0; i < entry.children.length; i++) {
                 child = entry.children[i];
                 if (child.selectable) {
                     picked[child.id] = value;
-                    try { child.ref.selected = value; } catch (_) {}
-                } else if (child.children.length > 0) {
+                    try { child.ref.selected = value; } catch (e) { logEvent("selection.descendants", e, child.ref); }
+                } else if (isStructuralContainer(child.ref)) {
                     setDescendantsPicked(child, value);
                 }
             }
@@ -586,7 +617,8 @@
                         b.width.toFixed(2) + " × " +
                         b.height.toFixed(2) + " pt" +
                         " / 選択中: " + count + "件";
-                } catch (_) {
+                } catch (e) {
+                    logEvent("bounds.info", e, clickedItem);
                     infoText.text = count + "件のオブジェクトを選択中";
                 }
             } else {
@@ -603,7 +635,7 @@
             if (!entry || !entry.selectable) return;
             try {
                 entry.ref.selected = !!picked[entry.id];
-            } catch (_) {}
+            } catch (e) { logEvent("selection.item", e, entry.ref); }
         }
 
         function activeView() {
@@ -634,7 +666,8 @@
                 bt.target = "illustrator";
             }
             bt.body = code;
-            bt.send();
+            bt.onError = function (message) { logEvent("bridgetalk.error", message.body); };
+            if (!bt.send()) logEvent("bridgetalk.send", "Message could not be sent");
         }
 
         function panToPointScript(x, y, zoom) {
@@ -662,82 +695,71 @@
                         currentZoom()
                     )
                 );
-            } catch (_) {}
+            } catch (e) { logEvent("view.follow", e, entry.ref); }
         }
 
-        function addDestinationBranch(container, uiParent) {
-            var children = destinationChildren(container);
-            var i, item, node, destKids, counts, label;
-
-            counts = {};
-            for (i = 0; i < children.length; i++) {
-                item = children[i];
-                destKids = destinationChildren(item);
-                label = labeledName(item, counts);
-
-                if (destKids.length > 0) {
-                    node = uiParent.add("node", label + "  [" + kindLabel(item) + "]");
-                    node._destinationIndex = destinationRefs.length;
-                    destinationRefs.push({
-                        ref: item,
-                        z: zOrderOf(item),
-                        type: typeOf(item),
-                        name: ""
-                    });
-                    try {
-                        destinationRefs[node._destinationIndex].name = String(item.name);
-                    } catch (_) {}
-                    addDestinationBranch(item, node);
-                    node.expanded = false;
-                } else {
-                    node = uiParent.add("item", label + "  [" + kindLabel(item) + "]");
-                    node._destinationIndex = destinationRefs.length;
-                    destinationRefs.push({
-                        ref: item,
-                        z: zOrderOf(item),
-                        type: typeOf(item),
-                        name: ""
-                    });
-                    try {
-                        destinationRefs[node._destinationIndex].name = String(item.name);
-                    } catch (_) {}
-                }
+        function addDestinationBranch(entries, uiParent) {
+            for (var i = 0; i < entries.length; i++) {
+                var entry = entries[i];
+                if (!isDestination(entry.ref)) continue;
+                var node = uiParent.add("node", entry.label + "  [" + kindLabel(entry.ref) + "]");
+                node._entry = entry;
+                node._loaded = false;
+                node._destinationIndex = destinationRefs.length;
+                var info = {ref: entry.ref, z: entry.zOrder, type: entry.itemType, name: ""};
+                try { info.name = String(entry.ref.name); } catch (_) {}
+                destinationRefs.push(info);
+                node.add("item", "読み込み…");
+                node.expanded = false;
             }
         }
 
+        destinationTree.onExpand = function (node) {
+            if (!node || node._loaded || !node._entry) return;
+            try {
+                ensureObjectChildren(node._entry);
+                node.removeAll();
+                addDestinationBranch(node._entry.children, node);
+                node._loaded = true;
+            } catch (e) { showError(e); }
+        };
+
+        // Model entries are created only for the current level. Both lists share them.
         function collectObjectBranch(container, depth) {
             var children = directChildren(container);
-            var nodes = [];
-            var i, item, entry, counts;
-
-            counts = {};
-            for (i = 0; i < children.length; i++) {
-                item = children[i];
-                entry = {
-                    id: objectEntries.length,
-                    ref: item,
-                    depth: depth,
-                    selectable: false,
-                    expanded: false,
-                    children: [],
+            var nodes = [], counts = {};
+            for (var i = 0; i < children.length; i++) {
+                var item = children[i];
+                var structural = isStructuralContainer(item);
+                var entry = {
+                    id: objectEntries.length, ref: item, depth: depth,
+                    selectable: !structural, expanded: false, children: [],
+                    childrenLoaded: !structural,
                     label: labeledName(item, counts),
-                    zOrder: zOrderOf(item),
-                    itemType: typeOf(item)
+                    zOrder: zOrderOf(item), itemType: typeOf(item)
                 };
                 objectEntries.push(entry);
-
-                if (isStructuralContainer(item)) {
-                    entry.selectable = false;
-                    entry.children = collectObjectBranch(item, depth + 1);
-                } else {
-                    entry.children = collectObjectBranch(item, depth + 1);
-                    entry.selectable = entry.children.length === 0;
-                }
-
                 nodes.push(entry);
             }
-
             return nodes;
+        }
+
+        function ensureObjectChildren(entry) {
+            if (entry.childrenLoaded) return;
+            var started = new Date().getTime();
+            entry.children = collectObjectBranch(entry.ref, entry.depth + 1);
+            entry.childrenLoaded = true;
+            logEvent("children.loaded", "elapsedMs=" + (new Date().getTime() - started) + " count=" + entry.children.length, entry.ref);
+        }
+
+        function loadAllTargets(nodes) {
+            for (var i = 0; i < nodes.length; i++) {
+                var entry = nodes[i];
+                if (!entry.selectable) {
+                    ensureObjectChildren(entry);
+                    loadAllTargets(entry.children);
+                }
+            }
         }
 
         function appendVisibleEntries(nodes, out) {
@@ -816,9 +838,8 @@
             picked = {};
 
             destinationTree.removeAll();
-            addDestinationBranch(doc, destinationTree);
-
             objectRoots = collectObjectBranch(doc, 0);
+            addDestinationBranch(objectRoots, destinationTree);
             paintObjectList();
 
             countText.text = "0件選択";
@@ -826,6 +847,7 @@
             statusText.text = "準備完了";
 
             updateRunState();
+            logEvent("startup.ready", "elapsedMs=" + (new Date().getTime() - sessionStarted) + " roots=" + objectRoots.length);
         }
 
         destinationTree.onChange = function () {
@@ -889,6 +911,7 @@
                     return;
                 }
 
+                ensureObjectChildren(entry);
                 if (entry.children.length === 0) {
                     inObjectListHandler = false;
                     return;
@@ -918,6 +941,7 @@
 
         selectAllButton.onClick = function () {
             try {
+                loadAllTargets(objectRoots);
                 var i, entry;
 
                 for (i = 0; i < objectEntries.length; i++) {
@@ -931,7 +955,9 @@
                 try {
                     for (i = 0; i < objectEntries.length; i++) {
                         entry = objectEntries[i];
-                        if (entry.selectable) entry.ref.selected = true;
+                        if (entry.selectable) {
+                            try { entry.ref.selected = true; } catch (e) { logEvent("selection.all", e, entry.ref); }
+                        }
                     }
                 } catch (_) {}
                 updateCountAndInfo(null);
@@ -968,7 +994,7 @@
             for (i = 0; i < objectEntries.length; i++) {
                 entry = objectEntries[i];
                 if (!entry.selectable || !picked[entry.id]) continue;
-                try { entry.ref.selected = true; } catch (_) {}
+                try { entry.ref.selected = true; } catch (e) { logEvent("selection.sync", e, entry.ref); }
             }
         }
 
@@ -987,6 +1013,10 @@
             return keys;
         }
 
+        function hostLoggerSource() {
+            return 'var logFile=new File("' + jsString(logFile.fsName) + '");' + logEvent.toString() + ';';
+        }
+
         function buildExecuteScript(destInfo, settings) {
             var keys = collectPickedKeys();
             var destType, destName, destZ;
@@ -1002,8 +1032,8 @@
                 : jsNumber(destInfo.z);
 
             return (
-                "(function(){" +
-                "if(!app.documents.length){alert('ドキュメントが開かれていません。');return;}" +
+                "(function(){" + hostLoggerSource() +
+                "if(!app.documents.length){logEvent('execute.document','No document');alert('ドキュメントが開かれていません。');return;}" +
                 "var doc=app.activeDocument;" +
                 "var oldcs=app.coordinateSystem;" +
                 "app.coordinateSystem=CoordinateSystem.DOCUMENTCOORDINATESYSTEM;" +
@@ -1046,14 +1076,14 @@
                 "try{k=keyOf(item.absoluteZOrderPosition,item.typename);}catch(e4){continue;}" +
                 "if(wanted[k]&&!found[k])found[k]=item;" +
                 "}" +
-                "}catch(e5){}" +
+                "}catch(e5){logEvent('sources.pageItems',e5);}" +
                 "try{" +
                 "for(i=0;i<doc.pathItems.length;i++){" +
                 "item=doc.pathItems[i];" +
                 "try{k=keyOf(item.absoluteZOrderPosition,item.typename);}catch(e6){continue;}" +
                 "if(wanted[k]&&!found[k])found[k]=item;" +
                 "}" +
-                "}catch(e7){}" +
+                "}catch(e7){logEvent('sources.pathItems',e7);}" +
                 "for(i=0;i<keys.length;i++){" +
                 "k=keyOf(keys[i].z,keys[i].t);" +
                 "result.push(found[k]||null);" +
@@ -1074,28 +1104,29 @@
                 "try{" +
                 "src=sources[i];" +
                 "if(!src&&fallbackIndex<selectionFallback.length){src=selectionFallback[fallbackIndex++];}" +
-                "if(!src){failed++;lastError='対象が見つかりません';continue;}" +
+                "if(!src){failed++;lastError='対象が見つかりません';logEvent('execute.source',lastError);continue;}" +
                 "try{b=src.visibleBounds;}catch(e8){b=src.geometricBounds;}" +
                 "w=Math.abs(b[2]-b[0]);h=Math.abs(b[1]-b[3]);" +
-                "if(w<=0||h<=0){failed++;continue;}" +
+                "if(w<=0||h<=0){failed++;logEvent('execute.bounds','Non-positive bounds',src);continue;}" +
                 "top=b[1]>b[3]?b[1]:b[3];left=b[0]<b[2]?b[0]:b[2];" +
                 "rect=null;" +
                 "try{rect=dest.pathItems.rectangle(top,left,w,h);}" +
                 "catch(e10){" +
                 "rect=doc.pathItems.rectangle(top,left,w,h);" +
-                "try{rect.move(dest,ElementPlacement.PLACEATBEGINNING);}catch(e11){}" +
+                "try{rect.move(dest,ElementPlacement.PLACEATBEGINNING);}catch(e11){logEvent('execute.move',e11);}" +
                 "}" +
                 "rect.stroked=false;rect.filled=true;" +
-                "try{rect.fillColor=color;}catch(e12){}" +
-                "try{rect.opacity=overlayOpacity;}catch(eOpacity){}" +
+                "try{rect.fillColor=color;}catch(e12){logEvent('execute.color',e12);}" +
+                "try{rect.opacity=overlayOpacity;}catch(eOpacity){logEvent('execute.opacity',eOpacity);}" +
                 "rect.name='オーバーレイ';" +
-                "try{rect.zOrder(ZOrderMethod.BRINGTOFRONT);}catch(eZ){}" +
+                "try{rect.zOrder(ZOrderMethod.BRINGTOFRONT);}catch(eZ){logEvent('execute.zOrder',eZ);}" +
                 "made.push(rect);" +
-                "}catch(e13){failed++;lastError=String(e13);}" +
+                "}catch(e13){failed++;lastError=String(e13);logEvent('execute.create',e13,src);}" +
                 "}" +
-                "try{app.coordinateSystem=oldcs;}catch(e14){}" +
-                "try{doc.selection=made;}catch(e15){}" +
-                "try{app.redraw();}catch(e16){}" +
+                "try{app.coordinateSystem=oldcs;}catch(e14){logEvent('execute.coordinates',e14);}" +
+                "try{doc.selection=made;}catch(e15){logEvent('execute.selection',e15);}" +
+                "try{app.redraw();}catch(e16){logEvent('execute.redraw',e16);}" +
+                "logEvent('execute.complete','made='+made.length+' failed='+failed);" +
                 "if(failed>0){" +
                 "alert(made.length+'件を作成しました。\\n'+failed+'件は作成できませんでした。'+(lastError?'\\n\\n'+lastError:''));" +
                 "}else{" +
@@ -1171,9 +1202,10 @@
             return true;
         };
 
-        rebuildTrees();
-        try { w.layout.layout(true); } catch (_) {}
         w.show();
+        w.update();
+        rebuildTrees();
+        try { w.layout.layout(true); } catch (e) { logEvent("ui.layout", e); }
 
     } catch (e) {
         showError(e);
