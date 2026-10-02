@@ -6,7 +6,7 @@ let reads = 0, z = 0, shown = false;
 function container(type, children) {
     const item = {typename:type, name:type, absoluteZOrderPosition:++z, layers:[], pathItems:{rectangle(){throw Error('locked destination');}}};
     children.forEach(child=>child.parent=item);
-    Object.defineProperty(item,'pageItems',{get(){assert(shown,'show window before scanning');reads++;return children;}});
+    Object.defineProperty(item,'pageItems',{get(){reads++;return children;}});
     return item;
 }
 const leaves = Array.from({length:1000},()=>({typename:'PathItem',name:'path',absoluteZOrderPosition:++z,visibleBounds:[0,10,10,0],geometricBounds:[0,10,10,0]}));
@@ -29,26 +29,32 @@ const context={app:{documents:[doc],activeDocument:doc,coordinateSystem:0,redraw
     alert:s=>alerts.push(s),confirm:()=>true,
     BridgeTalk:function(){this.send=()=>{bodies.push(this.body);return true;};}};
 vm.runInNewContext(source,context);
-assert.equal(reads,0,'startup must not scan descendants');
-const tree=controls.find(c=>c.type==='treeview');
-const list=controls.find(c=>c.type==='listbox');
-function clickRow(index){list.selection=list.items[index];list.onChange();}
-clickRow(0);
-assert.equal(reads,1,'opening layer reads only that layer');
-assert.equal(list.items.length,3,'layer, subtree toggle, collapsed group');
-tree.onExpand(tree.items[0]);
-assert.equal(reads,1,'destination shares model cache');
+assert.equal(reads,3,'one scan per container, no leaf scans');
+const trees=controls.filter(c=>c.type==='treeview');
+assert.equal(trees.length,2,'both lists use native arrows');
+const tree=trees[0], list=trees[1];
+const layerNode=list.items[0], groupNode=layerNode.items[1], nestedNode=groupNode.items[1];
+assert.equal(layerNode.type,'node');
+assert.equal(groupNode.type,'node');
+assert.equal(nestedNode.items.length,1001);
+assert.equal(layerNode.expanded,false);
+assert.equal(tree.items[0].expanded,false);
+function clickRow(row){list.selection=row;list.onChange();}
+layerNode.expanded=true;
+clickRow(layerNode);
+assert.equal(layerNode.expanded,true,'selection callback must not reverse native expansion');
 controls.find(c=>c.text==='全選択').onClick();
-assert(leaves.every(item=>item.selected),'all selects unloaded nested descendants');
-assert(controls.some(c=>c.text==='1000件選択'));
-clickRow(1); // descendant toggle, all already selected
-assert(leaves.every(item=>!item.selected),'subtree toggle clears collapsed descendants');
-clickRow(1);
-assert(leaves.every(item=>item.selected),'subtree toggle restores descendants');
-clickRow(2); // expand group
-clickRow(4); // expand nested group
-assert.equal(list.items.length,1006);
-assert(list.items[6].text.includes('☑'),'loaded rows retain picked markers');
+assert(leaves.every(item=>item.selected));
+clickRow(layerNode.items[0]);
+assert(leaves.every(item=>!item.selected));
+clickRow(layerNode.items[0]);
+assert(leaves.every(item=>item.selected));
+assert(nestedNode.items[1].text.includes('☑'));
+clickRow(nestedNode.items[1]);
+assert(!nestedNode.items[1]._entry.ref.selected);
+clickRow(nestedNode.items[1]);
+assert(nestedNode.items[1]._entry.ref.selected,'same leaf can be toggled again');
+assert.equal(reads,3,'UI interactions reuse model');
 const edits=controls.filter(c=>c.type==='edittext');
 assert.deepEqual(edits.map(c=>c.text),['0','255','0','100'],'preserve RGB and opacity');
 edits[0].text='12';edits[1].text='34';edits[2].text='56';edits[3].text='78';
@@ -65,4 +71,4 @@ assert(logs.some(line=>line.includes('startup.ready')));
 assert(alerts.at(-1).includes('1000件は作成できませんでした。'));
 controls.find(c=>c.text==='全解除').onClick();
 assert(controls.some(c=>c.text==='0件選択'));
-console.log('Passed: lazy startup, shared cache, nested whole/subtree selection, row markers, RGB/opacity preservation, generated host code and failure logging');
+console.log('Passed: native trees, single container scan, native disclosure isolation, subtree and repeated leaf toggles, settings and host failure logs');

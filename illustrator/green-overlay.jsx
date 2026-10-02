@@ -432,20 +432,13 @@
         }
 
         function objectRowText(entry) {
-            var marker;
             var check = "";
-
-            if (!entry.childrenLoaded || entry.children.length > 0) {
-                marker = entry.expanded ? "▼ " : "▶ ";
-            } else {
-                marker = "  ";
-            }
 
             if (entry.selectable) {
                 check = picked[entry.id] ? "☑ " : "☐ ";
             }
 
-            return indentText(entry.depth) + marker + check +
+            return check +
                 entry.label + "  [" + kindLabel(entry.ref) + "]";
         }
 
@@ -523,16 +516,8 @@
         countText.characters = 16;
 
 
-        /*
-          TreeView は onClick が来ない。ネイティブ複数選択は Ctrl/Cmd 必須。
-          クリック・トグルは ListBox で扱い、階層の開閉は行テキストで表現する。
-        */
-        var objectList = objectPanel.add(
-            "listbox",
-            undefined,
-            [],
-            { multiselect: false }
-        );
+        // Both lists use native TreeView disclosure buttons.
+        var objectList = objectPanel.add("treeview", undefined, []);
         objectList.preferredSize = [480, 330];
 
         var infoPanel = w.add("panel", undefined, "選択情報");
@@ -702,29 +687,23 @@
             for (var i = 0; i < entries.length; i++) {
                 var entry = entries[i];
                 if (!isDestination(entry.ref)) continue;
-                var node = uiParent.add("node", entry.label + "  [" + kindLabel(entry.ref) + "]");
-                node._entry = entry;
-                node._loaded = false;
+                var kids = [];
+                for (var j = 0; j < entry.children.length; j++) {
+                    if (isDestination(entry.children[j].ref)) kids.push(entry.children[j]);
+                }
+                var node = uiParent.add(kids.length ? "node" : "item", entry.label + "  [" + kindLabel(entry.ref) + "]");
                 node._destinationIndex = destinationRefs.length;
                 var info = {ref: entry.ref, z: entry.zOrder, type: entry.itemType, name: ""};
                 try { info.name = String(entry.ref.name); } catch (_) {}
                 destinationRefs.push(info);
-                node.add("item", "読み込み…");
-                node.expanded = false;
+                if (kids.length) {
+                    addDestinationBranch(kids, node);
+                    node.expanded = false;
+                }
             }
         }
 
-        destinationTree.onExpand = function (node) {
-            if (!node || node._loaded || !node._entry) return;
-            try {
-                ensureObjectChildren(node._entry);
-                node.removeAll();
-                addDestinationBranch(node._entry.children, node);
-                node._loaded = true;
-            } catch (e) { showError(e); }
-        };
-
-        // Model entries are created only for the current level. Both lists share them.
+        // Both native trees share one model; leaf objects do not scan child collections.
         function collectObjectBranch(container, depth) {
             var children = directChildren(container);
             var nodes = [], counts = {};
@@ -762,71 +741,41 @@
             }
         }
 
-        function appendVisibleEntries(nodes, out) {
-            var i, entry;
-            for (i = 0; i < nodes.length; i++) {
-                entry = nodes[i];
-                out.push(entry);
-                if (entry.expanded && entry.children.length > 0) {
-                    appendVisibleEntries(entry.children, out);
+        function addObjectNodes(entries, parent) {
+            for (var i = 0; i < entries.length; i++) {
+                var entry = entries[i];
+                var node = parent.add(entry.children.length ? "node" : "item", objectRowText(entry));
+                node._entry = entry;
+                entry.ui = node;
+                objectRows.push({ui: node, entry: entry});
+                if (entry.children.length) {
+                    var toggle = node.add("item", "☐ 配下を全選択 / 全解除");
+                    toggle._entry = {descendantToggle: true, parentEntry: entry};
+                    objectRows.push({ui: toggle, entry: toggle._entry});
+                    addObjectNodes(entry.children, node);
+                    node.expanded = false;
                 }
             }
         }
 
         function paintObjectList() {
-            var visible = [];
-            var i, entry, row;
-
-            appendVisibleEntries(objectRoots, visible);
-
             suppressObjectEvent++;
             try {
                 objectList.removeAll();
                 objectRows = [];
-
-                for (i = 0; i < visible.length; i++) {
-                    entry = visible[i];
-                    row = objectList.add("item", objectRowText(entry));
-                    objectRows[row.index] = entry;
-                    entry.ui = row;
-
-                    if (entry.children.length > 0 && entry.expanded) {
-                        row = objectList.add(
-                            "item",
-                            indentText(entry.depth + 1) +
-                            (descendantSelectionState(entry) === 2 ? "☑ " :
-                                (descendantSelectionState(entry) === 1 ? "◩ " : "☐ ")) +
-                            "配下を全選択 / 全解除"
-                        );
-                        objectRows[row.index] = {
-                            descendantToggle: true,
-                            parentEntry: entry
-                        };
-                    }
-                }
-            } finally {
-                suppressObjectEvent--;
-            }
+                addObjectNodes(objectRoots, objectList);
+            } finally { suppressObjectEvent--; }
         }
 
         function refreshVisibleObjectRows() {
-            var i, entry, row, state;
-            for (i = 0; i < objectRows.length; i++) {
-                entry = objectRows[i];
-                try {
-                    row = objectList.items[i];
-                    if (entry.descendantToggle) {
-                        state = descendantSelectionState(entry.parentEntry);
-                        if (row) {
-                            row.text =
-                                indentText(entry.parentEntry.depth + 1) +
-                                (state === 2 ? "☑ " : (state === 1 ? "◩ " : "☐ ")) +
-                                "配下を全選択 / 全解除";
-                        }
-                    } else if (entry.ui) {
-                        entry.ui.text = objectRowText(entry);
-                    }
-                } catch (_) {}
+            for (var i = 0; i < objectRows.length; i++) {
+                var row = objectRows[i], entry = row.entry;
+                if (entry.descendantToggle) {
+                    var state = descendantSelectionState(entry.parentEntry);
+                    row.ui.text = (state === 2 ? "☑ " : (state === 1 ? "◩ " : "☐ ")) + "配下を全選択 / 全解除";
+                } else {
+                    row.ui.text = objectRowText(entry);
+                }
             }
         }
 
@@ -839,6 +788,7 @@
 
             destinationTree.removeAll();
             objectRoots = collectObjectBranch(doc, 0);
+            loadAllTargets(objectRoots);
             addDestinationBranch(objectRoots, destinationTree);
             paintObjectList();
 
@@ -875,7 +825,7 @@
                     return;
                 }
 
-                entry = objectRows[row.index];
+                entry = row._entry;
                 if (!entry) {
                     inObjectListHandler = false;
                     return;
@@ -900,10 +850,10 @@
 
                 if (entry.selectable) {
                     picked[entry.id] = !picked[entry.id];
-                    row.text = objectRowText(entry);
+                    refreshVisibleObjectRows();
                     updateCountAndInfo(entry.ref);
                     try { applyIllustratorSelection(entry); } catch (_) {}
-                    requestCanvasFollow(entry);
+                    if (picked[entry.id]) requestCanvasFollow(entry);
                     suppressObjectEvent++;
                     try { objectList.selection = null; } catch (_) {}
                     suppressObjectEvent--;
@@ -911,25 +861,8 @@
                     return;
                 }
 
-                ensureObjectChildren(entry);
-                if (entry.children.length === 0) {
-                    inObjectListHandler = false;
-                    return;
-                }
-
-                entry.expanded = !entry.expanded;
-                suppressObjectEvent++;
-                try {
-                    paintObjectList();
-                    objectList.selection = null;
-                } catch (_) {
-                } finally {
-                    suppressObjectEvent--;
-                    inObjectListHandler = false;
-                }
-                statusText.text = entry.expanded
-                    ? "階層を開きました。"
-                    : "階層を閉じました。";
+                // Container disclosure is handled exclusively by the native TreeView.
+                inObjectListHandler = false;
             } catch (e) {
                 inObjectListHandler = false;
                 showError(e);
@@ -1202,10 +1135,9 @@
             return true;
         };
 
-        w.show();
-        w.update();
         rebuildTrees();
         try { w.layout.layout(true); } catch (e) { logEvent("ui.layout", e); }
+        w.show();
 
     } catch (e) {
         showError(e);
