@@ -1,7 +1,11 @@
 const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const source = fs.readFileSync(__dirname + '/../green-overlay.jsx', 'utf8').replace(/^#target.*$/gm, '');
+const raw = fs.readFileSync(__dirname + '/../green-overlay.jsx');
+assert.equal(raw[0], 0xEF);
+assert.equal(raw[1], 0xBB);
+assert.equal(raw[2], 0xBF, 'JSX must stay UTF-8 with BOM so Illustrator can read it');
+const source = raw.toString('utf8').replace(/^\uFEFF/, '').replace(/^#target.*$/gm, '');
 let reads = 0, z = 0, shown = false;
 function container(type, children) {
     const item = {typename:type, name:type, absoluteZOrderPosition:++z, layers:[], pathItems:{rectangle(){throw Error('locked destination');}}};
@@ -27,7 +31,7 @@ const context={app:{documents:[doc],activeDocument:doc,coordinateSystem:0,redraw
     Folder:{userData:{fsName:'/mock'}},File,$:{global:{}},Window:function(){return control('window');},
     RGBColor:function(){}, ElementPlacement:{PLACEATBEGINNING:1},ZOrderMethod:{BRINGTOFRONT:1},
     alert:s=>alerts.push(s),confirm:()=>true,
-    BridgeTalk:function(){this.send=()=>{bodies.push(this.body); if(this.body.indexOf("__greenOverlayLoadStep")>=0) pending.push(this); return true;};}};
+    BridgeTalk:function(){this.send=()=>{bodies.push(this.body); if(this.body==="'ok';") pending.push(this); return true;};}};
 vm.runInNewContext(source,context);
 assert(shown,'window must show before work');
 assert.equal(reads,0,'no initial scan');
@@ -35,9 +39,13 @@ assert.equal(pending.length,1);
 let batches=0;
 while(pending.length){
     const bt=pending.shift();
-    vm.runInNewContext(bt.body.replace(/^#target.*$/gm,''),context);
+    assert.equal(bt.body,"'ok';");
+    assert(!bt.body.includes('__greenOverlayLoadStep'));
+    assert(!bt.body.includes('#targetengine'));
+    // The message body runs outside the palette engine and must not need its functions.
+    vm.runInNewContext(bt.body,{$:{global:{}}});
     batches++;
-    if(bt.onResult) bt.onResult({body:''});
+    if(bt.onResult) bt.onResult({body:'ok'});
     assert(batches<1000,'loader terminates');
 }
 assert(batches>30,'large document is split across messages');
@@ -92,8 +100,25 @@ const cancel=controls.filter(c=>c.text==='読み込みを中止').at(-1);
 cancel.onClick();
 const queued=pending.shift();
 const before=reads;
-vm.runInNewContext(queued.body.replace(/^#target.*$/gm,''),context2);
-queued.onResult({body:''});
+vm.runInNewContext(queued.body,{$:{global:{}}});
+queued.onResult({body:'ok'});
 assert.equal(reads,before);
 assert.equal(pending.length,0);
 console.log('Passed: window-first loading, bounded queued batches and cancellation');
+
+// A failed yield must not leave the palette dead. Finish the same steps in this engine.
+const readsAtIdle=reads, alertsAtIdle=alerts.length;
+const context3={...context, $:{global:{}}};
+vm.runInNewContext(source,context3);
+assert.equal(reads,readsAtIdle,'show still happens before any scan');
+const failed=pending.shift();
+failed.onError({body:'ReferenceError'});
+assert.equal(reads,readsAtIdle+3);
+assert.equal(alerts.length,alertsAtIdle);
+assert.equal(pending.length,0);
+const latestList=controls.filter(c=>c.type==='treeview').at(-1);
+assert.equal(latestList.enabled,true);
+assert(latestList.items[0].items.length>1);
+assert(logs.some(line=>line.includes('bridgetalk.load')));
+assert(logs.some(line=>line.includes('startup.ready')));
+console.log('Passed: BridgeTalk load failure falls back inside the palette engine');

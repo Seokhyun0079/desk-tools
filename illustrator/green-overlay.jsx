@@ -1,4 +1,4 @@
-#target illustrator
+﻿#target illustrator
 #targetengine "greenOverlayEngine"
 
 (function () {
@@ -802,15 +802,48 @@
                 col: null, index: 0, length: 0, refs: [], seen: {}, counts: {}, stage: 0, build: 0};
         }
 
+        // Illustrator does not apply #targetengine to a BridgeTalk body, so the body
+        // runs in the default engine and cannot see palette functions. Calling
+        // $.global.__greenOverlayLoadStep from the body failed the same way execute once did.
+        // The body only yields. onResult continues in the engine that owns the palette.
+        var loadPump = 0;
+
         function queueLoadStep() {
             if (!loading) return;
+            var pump = ++loadPump;
             var bt = new BridgeTalk();
-            bt.target = BridgeTalk.appSpecifier || "illustrator";
-            bt.body = '#targetengine "greenOverlayEngine"\n' +
-                '$.global.__greenOverlayLoadStep("' + jsString(loadToken) + '");';
-            bt.onResult = function () { if (loading) queueLoadStep(); };
-            bt.onError = function (message) { stopLoading("読み込みに失敗しました。", message.body); };
-            if (!bt.send()) stopLoading("読み込みを開始できませんでした。", "BridgeTalk send failed");
+            try {
+                bt.target = BridgeTalk.appSpecifier || "illustrator";
+            } catch (_) {
+                bt.target = "illustrator";
+            }
+            bt.body = "'ok';";
+            bt.onResult = function () {
+                if (pump !== loadPump || !loading) return;
+                loadStep(loadToken);
+                if (loading) queueLoadStep();
+            };
+            bt.onError = function (message) {
+                if (pump !== loadPump || !loading) return;
+                var detail = message && message.body !== undefined ? message.body : message;
+                logEvent("bridgetalk.load", detail);
+                loadPump++;
+                runLoadInline();
+            };
+            if (!bt.send()) {
+                logEvent("bridgetalk.load", "BridgeTalk send failed");
+                loadPump++;
+                runLoadInline();
+            }
+        }
+
+        function runLoadInline() {
+            try {
+                while (loading) loadStep(loadToken);
+            } catch (e) {
+                stopLoading("読み込みに失敗しました。", e);
+                showError(e);
+            }
         }
 
         function stopLoading(message, error) {
@@ -891,7 +924,7 @@
             }
         }
 
-        $.global.__greenOverlayLoadStep = function (token) {
+        function loadStep(token) {
             if (!loading || token !== loadToken) return;
             try {
                 if (!app.documents.length || !sameItem(app.activeDocument, doc)) {
@@ -925,7 +958,7 @@
                 statusText.text = frames[ticks++ % 4] + (uiStarted ? " 一覧を作成中… " : " 読み込み中… ") + objectEntries.length + "件 / 調査 " + scanned + "件";
                 w.update();
             } catch (e) { stopLoading("読み込みに失敗しました。", e); showError(e); }
-        };
+        }
         var uiStarted = false;
 
         function rebuildTrees() {
