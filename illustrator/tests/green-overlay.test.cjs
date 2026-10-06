@@ -147,3 +147,59 @@ assert(groupEntries.some(entry => entry.ref === clippedArt));
 assert(groupEntries.some(entry => entry.ref === clipPath), 'clipping path omitted by pageItems is listed');
 assert(!controls.some(c => c.addedWhileCollapsed));
 console.log('Passed: clipping paths and meshes missing from pageItems are shown');
+
+// Mixed containers must supplement every artwork collection, even when pageItems
+// already exposes text. Duplicate references must remain a single tree entry.
+const textOnly = art('TextFrame', 'text');
+const linked = art('PlacedItem', '', {file:{name:'linked.png'}});
+const embedded = art('RasterItem', 'embedded');
+const symbol = art('SymbolItem', 'symbol');
+const extraGroup = withKids(art('GroupItem', 'extra-group', {layers:[]}), [], {});
+const compoundChild = art('PathItem', 'compound-child');
+const compound = art('CompoundPathItem', 'compound', {pathItems:[compoundChild]});
+compoundChild.parent = compound;
+const mixedArt = [linked, embedded, symbol, extraGroup, compound,
+    art('PathItem','path'), art('MeshItem','mesh'), art('PluginItem','plugin'),
+    art('GraphItem','graph'), art('NonNativeItem','non-native'), art('LegacyTextItem','legacy')];
+const propsForType = {PlacedItem:'placedItems',RasterItem:'rasterItems',SymbolItem:'symbolItems',
+    GroupItem:'groupItems',CompoundPathItem:'compoundPathItems',PathItem:'pathItems',
+    MeshItem:'meshItems',PluginItem:'pluginItems',GraphItem:'graphItems',
+    NonNativeItem:'nonNativeItems',LegacyTextItem:'legacyTextItems'};
+const typed = {textFrames:[textOnly]};
+for (const item of mixedArt) typed[propsForType[item.typename]] = [item];
+// Include one image in both collections to check deduplication.
+const mixedGroup = withKids(art('GroupItem','mixed',{layers:[]}), [textOnly,linked], typed);
+mixedArt.forEach(item => { item.parent = mixedGroup; });
+const mixedLayer = withKids(art('Layer','mixed-layer',{layers:[]}), [mixedGroup], {});
+// Layer typed collections can include descendants; do not flatten them.
+mixedLayer.placedItems = [linked];
+const mixedDoc = {...docMissing,layers:[mixedLayer],activeLayer:mixedLayer};
+vm.runInNewContext(source,{...context,$:{global:{}},app:{...context.app,documents:[mixedDoc],activeDocument:mixedDoc}});
+const mixedTree = controls.filter(c=>c.type==='treeview').at(-1);
+const layerArt = entriesOf(mixedTree.items[0]).filter(entry=>!entry.descendantToggle);
+assert.equal(layerArt.length,1,'nested images stay inside their group');
+const mixedEntries = entriesOf(layerArt[0].ui).filter(entry=>!entry.descendantToggle);
+assert.equal(mixedEntries.length,mixedArt.length+1);
+for (const item of mixedArt) assert.equal(mixedEntries.filter(entry=>entry.ref===item).length,1,item.typename+' is listed once');
+assert(mixedEntries.find(entry=>entry.ref===linked).ui.text.includes('linked.png'));
+assert(entriesOf(mixedEntries.find(entry=>entry.ref===compound).ui).some(entry=>entry.ref===compoundChild));
+console.log('Passed: mixed text/image/symbol/group collections are complete and preserve hierarchy');
+
+// Missing optional stacking metadata must not make distinct images share a key.
+const noIdA = {typename:'RasterItem',name:'same'};
+const noIdB = {typename:'RasterItem',name:'same'};
+const uuidA = {typename:'PlacedItem',name:'same',uuid:'image-a'};
+const uuidB = {typename:'PlacedItem',name:'same',uuid:'image-b'};
+const uuidWrapper = {...uuidA};
+const idLayer = withKids(art('Layer','ids',{layers:[]}),[noIdA,noIdB,uuidA,uuidB],{
+    rasterItems:[noIdA,noIdB],placedItems:[uuidWrapper,uuidB]
+});
+uuidWrapper.parent=idLayer;
+const idDoc = {...docMissing,layers:[idLayer],activeLayer:idLayer};
+vm.runInNewContext(source,{...context,$:{global:{}},app:{...context.app,documents:[idDoc],activeDocument:idDoc}});
+const idTree=controls.filter(c=>c.type==='treeview').at(-1);
+const idEntries=entriesOf(idTree.items[0]).filter(entry=>!entry.descendantToggle);
+assert.equal(idEntries.length,4,'keep distinct images and deduplicate repeated references or UUIDs');
+assert(idEntries.some(entry=>entry.ref===noIdA));
+assert(idEntries.some(entry=>entry.ref===noIdB));
+console.log('Passed: missing stacking metadata keeps distinct images, UUID duplicates are removed');
