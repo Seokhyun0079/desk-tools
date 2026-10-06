@@ -1,8 +1,12 @@
 const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const source = fs.readFileSync(__dirname + '/../green-overlay.jsx', 'utf8').replace(/^#target.*$/gm, '');
-let reads = 0, z = 0, shown = false;
+const raw = fs.readFileSync(__dirname + '/../green-overlay.jsx');
+assert.equal(raw[0], 0xEF);
+assert.equal(raw[1], 0xBB);
+assert.equal(raw[2], 0xBF, 'JSX must stay UTF-8 with BOM so Illustrator can read it');
+const source = raw.toString('utf8').replace(/^\uFEFF/, '').replace(/^#target.*$/gm, '');
+let reads = 0, z = 0, shown = false, readsAtShow = null, windowLayouts = 0;
 function container(type, children) {
     const item = {typename:type, name:type, absoluteZOrderPosition:++z, layers:[], pathItems:{rectangle(){throw Error('locked destination');}}};
     children.forEach(child=>child.parent=item);
@@ -18,30 +22,28 @@ doc.pathItems.rectangle = () => { throw Error('locked destination'); };
 const controls=[], logs=[], alerts=[], bodies=[], pending=[];
 function control(type,text) {
     const c={type,text,items:[],selection:null,layout:{resize(){},layout(){}},
-        add(type,a,b){const child=control(type,b===undefined?a:b);child.index=this.items.length;this.items.push(child);return child;},
-        removeAll(){this.items=[];},show(){shown=true;},update(){},close(){},hide(){}};
+        add(type,a,b){if(this.expanded===false) this.addedWhileCollapsed=true; const child=control(type,b===undefined?a:b);child.index=this.items.length;this.items.push(child);return child;},
+        removeAll(){this.items=[];},show(){shown=true; readsAtShow=reads;},update(){},close(){},hide(){}};
     controls.push(c);return c;
 }
 function File(){this.fsName='/mock/log';this.parent={exists:true};this.open=()=>true;this.writeln=s=>logs.push(s);this.close=()=>{};}
 const context={app:{documents:[doc],activeDocument:doc,coordinateSystem:0,redraw(){}},CoordinateSystem:{DOCUMENTCOORDINATESYSTEM:1},
-    Folder:{userData:{fsName:'/mock'}},File,$:{global:{}},Window:function(){return control('window');},
+    Folder:{userData:{fsName:'/mock'}},File,$:{global:{}},Window:function(){
+        const w=control('window');
+        const layout=w.layout.layout.bind(w.layout);
+        w.layout.layout=function(){windowLayouts++; return layout();};
+        return w;
+    },
     RGBColor:function(){}, ElementPlacement:{PLACEATBEGINNING:1},ZOrderMethod:{BRINGTOFRONT:1},
     alert:s=>alerts.push(s),confirm:()=>true,
-    BridgeTalk:function(){this.send=()=>{bodies.push(this.body); if(this.body.indexOf("__greenOverlayLoadStep")>=0) pending.push(this); return true;};}};
+    BridgeTalk:function(){this.send=()=>{bodies.push(this.body); if(this.body==="'ok';") pending.push(this); return true;};}};
 vm.runInNewContext(source,context);
 assert(shown,'window must show before work');
-assert.equal(reads,0,'no initial scan');
-assert.equal(pending.length,1);
-let batches=0;
-while(pending.length){
-    const bt=pending.shift();
-    vm.runInNewContext(bt.body.replace(/^#target.*$/gm,''),context);
-    batches++;
-    if(bt.onResult) bt.onResult({body:''});
-    assert(batches<1000,'loader terminates');
-}
-assert(batches>30,'large document is split across messages');
+assert.equal(readsAtShow,0,'window shows before page item scans');
+assert.equal(pending.length,0,'hierarchy load must not wait on BridgeTalk');
+assert(!bodies.some(body=>body.includes('__greenOverlayLoadStep')||body.includes('#targetengine')));
 assert.equal(reads,3,'one scan per container, no leaf scans');
+assert(windowLayouts>=2,'tree is laid out again after items exist');
 const trees=controls.filter(c=>c.type==='treeview');
 assert.equal(trees.length,2,'both lists use native arrows');
 const tree=trees[0], list=trees[1];
@@ -49,6 +51,7 @@ const layerNode=list.items[0], groupNode=layerNode.items[1], nestedNode=groupNod
 assert.equal(layerNode.type,'node');
 assert.equal(groupNode.type,'node');
 assert.equal(nestedNode.items.length,1001);
+assert(!controls.some(c=>c.addedWhileCollapsed),'children added to a collapsed node stay invisible');
 assert.equal(layerNode.expanded,false);
 assert.equal(tree.items[0].expanded,false);
 function clickRow(row){list.selection=row;list.onChange();}
@@ -85,15 +88,62 @@ controls.find(c=>c.text==='全解除').onClick();
 assert(controls.some(c=>c.text==='0件選択'));
 console.log('Passed: native trees, single container scan, native disclosure isolation, subtree and repeated leaf toggles, settings and host failure logs');
 
-// Cancellation must invalidate queued work and prevent further scheduling.
-const context2={...context, $:{global:{}}};
-vm.runInNewContext(source,context2);
-const cancel=controls.filter(c=>c.text==='読み込みを中止').at(-1);
-cancel.onClick();
-const queued=pending.shift();
-const before=reads;
-vm.runInNewContext(queued.body.replace(/^#target.*$/gm,''),context2);
-queued.onResult({body:''});
-assert.equal(reads,before);
-assert.equal(pending.length,0);
-console.log('Passed: window-first loading, bounded queued batches and cancellation');
+// The first document handle cannot list layers. The open document still fills both trees.
+let activeHits = 0;
+const broken = {typename:'Document', name:'broken', views:[{zoom:1}], get layers(){ throw new Error('This is not a document'); }};
+const flakyApp = Object.create(context.app);
+Object.defineProperty(flakyApp, 'activeDocument', {
+    get() { activeHits += 1; return activeHits === 1 ? broken : doc; }
+});
+const readsBefore = reads, alertsBefore = alerts.length;
+const context2 = {...context, $:{global:{}}, app: flakyApp};
+vm.runInNewContext(source, context2);
+assert.equal(alerts.length, alertsBefore);
+assert.equal(reads, readsBefore + 3);
+const recovered = controls.filter(c => c.type === 'treeview').at(-1);
+assert.equal(recovered.enabled, true);
+assert(recovered.items[0].items.length > 1);
+assert(logs.some(line => line.includes('children.layers') && line.includes('not a document')));
+assert(logs.some(line => line.includes('startup.document') && line.includes('rebound')));
+assert(logs.some(line => line.includes('roots=1')));
+console.log('Passed: unreadable document handle rebinds and shows layers');
+
+function art(type, name, extra) {
+    const item = Object.assign({typename:type, name:name, absoluteZOrderPosition:++z}, extra||{});
+    return item;
+}
+const clipPath = art('PathItem', '<Clip>', {clipping:true});
+const clippedArt = art('PathItem', 'inside');
+const mesh = art('MeshItem', 'mesh');
+const plain = art('PathItem', 'plain');
+function withKids(item, kids, extraCols) {
+    kids.forEach(child => { child.parent = item; });
+    Object.defineProperty(item, 'pageItems', {get(){ return kids; }});
+    Object.assign(item, extraCols||{});
+    return item;
+}
+const clipGroup = withKids(art('GroupItem', 'clips', {clipped:true, layers:[]}), [clippedArt], {
+    pathItems:[clipPath], meshItems:[], pluginItems:[], graphItems:[], nonNativeItems:[], legacyTextItems:[]
+});
+clipPath.parent = clipGroup;
+const hostLayer = withKids(art('Layer', 'Host', {layers:[]}), [clipGroup, plain], {
+    pathItems:[clipPath, clippedArt, plain], meshItems:[mesh], pluginItems:[], graphItems:[], nonNativeItems:[], legacyTextItems:[]
+});
+mesh.parent = hostLayer;
+const docMissing = {typename:'Document', name:'missing-types', layers:[hostLayer], views:[{zoom:1}], pageItems:[], pathItems:{rectangle(){throw Error('x');}}, selection:[], activeLayer:hostLayer};
+const contextMissing = {...context, $:{global:{}}, app:{...context.app, documents:[docMissing], activeDocument:docMissing}};
+vm.runInNewContext(source, contextMissing);
+const missingList = controls.filter(c => c.type==='treeview').at(-1);
+function entriesOf(node) {
+    return (node.items||[]).map(child => child._entry).filter(Boolean);
+}
+const hostNode = missingList.items[0];
+const hostEntries = entriesOf(hostNode).filter(entry => !entry.descendantToggle);
+assert(hostEntries.some(entry => entry.ref === mesh), 'mesh outside pageItems is listed');
+assert(!hostEntries.some(entry => entry.ref === clipPath), 'clipping path stays inside its group');
+const groupNodeMissing = hostEntries.find(entry => entry.ref === clipGroup).ui;
+const groupEntries = entriesOf(groupNodeMissing).filter(entry => !entry.descendantToggle);
+assert(groupEntries.some(entry => entry.ref === clippedArt));
+assert(groupEntries.some(entry => entry.ref === clipPath), 'clipping path omitted by pageItems is listed');
+assert(!controls.some(c => c.addedWhileCollapsed));
+console.log('Passed: clipping paths and meshes missing from pageItems are shown');

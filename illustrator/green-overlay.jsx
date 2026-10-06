@@ -1,4 +1,4 @@
-#target illustrator
+﻿#target illustrator
 #targetengine "greenOverlayEngine"
 
 (function () {
@@ -252,7 +252,12 @@
             var clipped = false;
             var pt;
 
-            if (!p) return false;
+            if (!p) {
+                try {
+                    if (typeOf(container) === "GroupItem" && container.clipped && item.clipping) return true;
+                } catch (_) {}
+                return false;
+            }
             if (sameItem(p, container)) return true;
 
             try {
@@ -785,6 +790,10 @@
         var loadToken = String(new Date().getTime()) + ":" + Math.random();
         var scanJobs = [], uiJobs = [], ticks = 0, scanned = 0;
         var typedProps = ["groupItems", "compoundPathItems", "pathItems", "textFrames", "placedItems", "rasterItems", "symbolItems", "meshItems", "pluginItems", "graphItems", "nonNativeItems", "legacyTextItems"];
+        // pageItems omits clipping paths and several host types whenever the container
+        // already has other artwork. Always union those direct children.
+        var supplementProps = ["pathItems", "meshItems", "pluginItems", "graphItems", "nonNativeItems", "legacyTextItems"];
+        var nodesToCollapse = [];
 
         function enableLists(value) {
             destinationTree.enabled = objectList.enabled = value;
@@ -802,15 +811,56 @@
                 col: null, index: 0, length: 0, refs: [], seen: {}, counts: {}, stage: 0, build: 0};
         }
 
-        function queueLoadStep() {
-            if (!loading) return;
-            var bt = new BridgeTalk();
-            bt.target = BridgeTalk.appSpecifier || "illustrator";
-            bt.body = '#targetengine "greenOverlayEngine"\n' +
-                '$.global.__greenOverlayLoadStep("' + jsString(loadToken) + '");';
-            bt.onResult = function () { if (loading) queueLoadStep(); };
-            bt.onError = function (message) { stopLoading("読み込みに失敗しました。", message.body); };
-            if (!bt.send()) stopLoading("読み込みを開始できませんでした。", "BridgeTalk send failed");
+        // A BridgeTalk callback can run while the open file is temporarily "not a document".
+        // Layer reads there finish as an empty tree and the status still says ready.
+        // Read the hierarchy in this turn, after the window is visible.
+        function runLoadInline() {
+            try {
+                while (loading) loadStep(loadToken);
+            } catch (e) {
+                stopLoading("読み込みに失敗しました。", e);
+                showError(e);
+            }
+        }
+
+        function collapseFinishedNodes() {
+            for (var i = nodesToCollapse.length - 1; i >= 0; i--) {
+                try { nodesToCollapse[i].expanded = false; } catch (_) {}
+            }
+            nodesToCollapse = [];
+        }
+
+        function relayout() {
+            try { w.layout.layout(true); } catch (e) { logEvent("ui.layout", e); }
+            try { destinationTree.layout.layout(true); } catch (_) {}
+            try { objectList.layout.layout(true); } catch (_) {}
+            try { w.update(); } catch (_) {}
+        }
+
+        function layerLength(target) {
+            try {
+                var layers = target.layers;
+                if (!layers || typeof layers.length !== "number") return -1;
+                return layers.length;
+            } catch (e) {
+                logEvent("children.layers", e, target);
+                return -1;
+            }
+        }
+
+        function useReadableDocument() {
+            if (layerLength(doc) > 0) return true;
+            try {
+                var active = app.activeDocument;
+                if (active && layerLength(active) > 0) {
+                    doc = active;
+                    logEvent("startup.document", "rebound");
+                    return true;
+                }
+            } catch (e) {
+                logEvent("startup.document", e);
+            }
+            return false;
         }
 
         function stopLoading(message, error) {
@@ -843,9 +893,13 @@
                 job.prop++; job.col = null; job.index = 0;
                 return false;
             }
-            // Retain the branch's typed-collection fallback for unusual host objects.
+            if (job.stage < 1 && typeOf(job.ref) !== "Document" && typeOf(job.ref) !== "CompoundPathItem") {
+                job.stage = 1; job.props = supplementProps; job.prop = 0;
+                return false;
+            }
+            // Last resort for hosts whose direct-child test rejects every item.
             if (job.stage < 2 && typeOf(job.ref) !== "Document" && typeOf(job.ref) !== "CompoundPathItem" && artItemCount(job.refs) === 0) {
-                job.stage++; job.props = typedProps; job.prop = 0;
+                job.stage = 2; job.props = typedProps; job.prop = 0;
                 return false;
             }
             if (!job.sorted) {
@@ -869,10 +923,12 @@
             node._entry = entry; entry.ui = node;
             objectRows.push({ui: node, entry: entry});
             if (entry.children.length) {
+                // Children added while a node is collapsed do not appear later.
+                node.expanded = true;
+                nodesToCollapse.push(node);
                 var toggle = node.add("item", "☐ 配下を全選択 / 全解除");
                 toggle._entry = {descendantToggle: true, parentEntry: entry};
                 objectRows.push({ui: toggle, entry: toggle._entry});
-                node.expanded = false;
             }
             var destParent = job.destParent;
             if (isDestination(entry.ref)) {
@@ -884,17 +940,30 @@
                 dest._destinationIndex = destinationRefs.length;
                 var info = {ref: entry.ref, z: entry.zOrder, type: entry.itemType, name: ""};
                 try { info.name = String(entry.ref.name); } catch (_) {}
-                destinationRefs.push(info); dest.expanded = false; destParent = dest;
+                destinationRefs.push(info);
+                if (hasDest) {
+                    dest.expanded = true;
+                    nodesToCollapse.push(dest);
+                }
+                destParent = dest;
             }
             for (var i = entry.children.length - 1; i >= 0; i--) {
                 uiJobs.push({entry: entry.children[i], objectParent: node, destParent: destParent});
             }
         }
 
-        $.global.__greenOverlayLoadStep = function (token) {
+        function capturedDocumentClosed() {
+            try {
+                return !app.documents.length;
+            } catch (_) {
+                return false;
+            }
+        }
+
+        function loadStep(token) {
             if (!loading || token !== loadToken) return;
             try {
-                if (!app.documents.length || !sameItem(app.activeDocument, doc)) {
+                if (capturedDocumentClosed()) {
                     stopLoading("ドキュメントが変わりました。再実行してください。"); return;
                 }
                 var started = new Date().getTime(), units = 0;
@@ -914,8 +983,12 @@
                         }
                         if (!uiJobs.length) {
                             loading = false; enableLists(true); updateRunState();
-                            statusText.text = "準備完了";
-                            logEvent("startup.ready", "elapsedMs=" + (new Date().getTime() - sessionStarted) + " entries=" + objectEntries.length);
+                            collapseFinishedNodes();
+                            relayout();
+                            statusText.text = objectRoots.length
+                                ? "準備完了"
+                                : "レイヤーを読み取れませんでした。再実行してください。";
+                            logEvent("startup.ready", "elapsedMs=" + (new Date().getTime() - sessionStarted) + " entries=" + objectEntries.length + " roots=" + objectRoots.length);
                             return;
                         }
                         drawOne(uiJobs.pop());
@@ -925,16 +998,26 @@
                 statusText.text = frames[ticks++ % 4] + (uiStarted ? " 一覧を作成中… " : " 読み込み中… ") + objectEntries.length + "件 / 調査 " + scanned + "件";
                 w.update();
             } catch (e) { stopLoading("読み込みに失敗しました。", e); showError(e); }
-        };
+        }
         var uiStarted = false;
 
         function rebuildTrees() {
             destinationRefs = []; objectEntries = []; objectRoots = []; objectRows = []; picked = {};
             destinationTree.removeAll(); objectList.removeAll();
+            nodesToCollapse = [];
             loading = true; enableLists(false);
+            if (!useReadableDocument()) {
+                loading = false;
+                enableLists(false);
+                cancelLoadButton.enabled = false;
+                statusText.text = "レイヤーを読み取れませんでした。再実行してください。";
+                logEvent("startup.failed", "No readable layers");
+                relayout();
+                return;
+            }
             scanJobs = [scanJob(doc, 0, objectRoots)]; uiJobs = []; uiStarted = false;
             statusText.text = "読み込み中…";
-            queueLoadStep();
+            runLoadInline();
         }
 
         destinationTree.onChange = function () {
