@@ -218,6 +218,10 @@
                 return false;
             }
             try {
+                var au = a.uuid, bu = b.uuid;
+                if (typeof au === "string" && au && typeof bu === "string" && bu) return au === bu;
+            } catch (_) {}
+            try {
                 var az = a.absoluteZOrderPosition, bz = b.absoluteZOrderPosition;
                 if (typeof az === "number" && typeof bz === "number" && az === bz) return true;
             } catch (_) {}
@@ -225,11 +229,18 @@
         }
 
         function itemKey(item) {
+            var t = typeOf(item), value;
             try {
-                return item.typename + "#" + item.absoluteZOrderPosition;
+                value = item.uuid;
+                if (typeof value === "string" && value) return t + "@uuid:" + value;
             } catch (_) {}
             try {
-                return item.typename + "@" + item.zOrderPosition + ":" + item.name;
+                value = item.absoluteZOrderPosition;
+                if (typeof value === "number" && isFinite(value)) return t + "#" + value;
+            } catch (_) {}
+            try {
+                value = item.zOrderPosition;
+                if (typeof value === "number" && isFinite(value)) return t + "@local:" + value;
             } catch (_) {}
             return "";
         }
@@ -239,6 +250,12 @@
             if (key) {
                 if (seen[key]) return;
                 seen[key] = true;
+            } else {
+                // Undefined metadata is not an identity. Retain distinct artwork
+                // and only remove repeated host references when no key exists.
+                for (var i = 0; i < result.length; i++) {
+                    if (sameItem(result[i], item)) return;
+                }
             }
             result.push(item);
         }
@@ -368,9 +385,7 @@
 
             addCollectionItems(container, "pageItems", result, seen, true);
 
-            if (artItemCount(result) === 0) {
-                addTypedChildren(container, result, seen, true);
-            }
+            addTypedChildren(container, result, seen, true);
 
             if (artItemCount(result) === 0) {
                 addCollectionItems(container, "groupItems", result, seen, false);
@@ -790,9 +805,9 @@
         var loadToken = String(new Date().getTime()) + ":" + Math.random();
         var scanJobs = [], uiJobs = [], ticks = 0, scanned = 0;
         var typedProps = ["groupItems", "compoundPathItems", "pathItems", "textFrames", "placedItems", "rasterItems", "symbolItems", "meshItems", "pluginItems", "graphItems", "nonNativeItems", "legacyTextItems"];
-        // pageItems omits clipping paths and several host types whenever the container
-        // already has other artwork. Always union those direct children.
-        var supplementProps = ["pathItems", "meshItems", "pluginItems", "graphItems", "nonNativeItems", "legacyTextItems"];
+        // Mixed containers need every typed collection, including linked/embedded
+        // images and symbols. Keep only direct children and remove duplicates.
+        var supplementProps = typedProps;
         var nodesToCollapse = [];
 
         function enableLists(value) {
