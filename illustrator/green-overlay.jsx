@@ -946,13 +946,14 @@
         function drawOne(job) {
             var entry = job.entry;
             var node = job.objectParent.add(entry.children.length ? "node" : "item", objectRowText(entry));
+            // Expand only after a real child exists; an empty node may ignore it.
+            if (job.objectParent !== objectList) job.objectParent.expanded = true;
             node._entry = entry; entry.ui = node;
             objectRows.push({ui: node, entry: entry});
             if (entry.children.length) {
-                // Children added while a node is collapsed do not appear later.
-                node.expanded = true;
                 nodesToCollapse.push(node);
                 var toggle = node.add("item", "☐ 配下を全選択 / 全解除");
+                node.expanded = true;
                 toggle._entry = {descendantToggle: true, parentEntry: entry};
                 objectRows.push({ui: toggle, entry: toggle._entry});
             }
@@ -963,12 +964,12 @@
                     if (isDestination(entry.children[k].ref)) { hasDest = true; break; }
                 }
                 var dest = destParent.add(hasDest ? "node" : "item", entry.label + "  [" + kindLabel(entry.ref) + "]");
+                if (destParent !== destinationTree) destParent.expanded = true;
                 dest._destinationIndex = destinationRefs.length;
                 var info = {ref: entry.ref, z: entry.zOrder, type: entry.itemType, name: ""};
                 try { info.name = String(entry.ref.name); } catch (_) {}
                 destinationRefs.push(info);
                 if (hasDest) {
-                    dest.expanded = true;
                     nodesToCollapse.push(dest);
                 }
                 destParent = dest;
