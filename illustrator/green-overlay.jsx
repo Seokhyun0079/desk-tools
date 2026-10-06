@@ -810,6 +810,17 @@
         var supplementProps = typedProps;
         var nodesToCollapse = [];
 
+        function captureDiagnosticCounts() {
+            var counts = {};
+            for (var i = 0; i < objectEntries.length; i++) {
+                // itemType was cached by the existing loader. Do not make new
+                // Illustrator DOM calls just to prepare a diagnostic report.
+                var t = objectEntries[i].itemType || "Unknown";
+                counts[t] = (counts[t] || 0) + 1;
+            }
+            $.global.__greenOverlayDiagnostic = {schema: "overlay-counts-v1", state: "ready", counts: counts};
+        }
+
         function enableLists(value) {
             destinationTree.enabled = objectList.enabled = value;
             selectAllButton.enabled = clearButton.enabled = value;
@@ -1000,6 +1011,7 @@
                             loading = false; enableLists(true); updateRunState();
                             collapseFinishedNodes();
                             relayout();
+                            captureDiagnosticCounts();
                             statusText.text = objectRoots.length
                                 ? "準備完了"
                                 : "レイヤーを読み取れませんでした。再実行してください。";
@@ -1017,6 +1029,7 @@
         var uiStarted = false;
 
         function rebuildTrees() {
+            $.global.__greenOverlayDiagnostic = {schema: "overlay-counts-v1", state: "loading", counts: {}};
             destinationRefs = []; objectEntries = []; objectRoots = []; objectRows = []; picked = {};
             destinationTree.removeAll(); objectList.removeAll();
             nodesToCollapse = [];
@@ -1364,6 +1377,7 @@
         w.onClose = function () {
             try {
                 loading = false;
+                $.global.__greenOverlayDiagnostic = null;
                 $.global.__greenOverlayWindow = null;
                 try { w.hide(); } catch (_) {}
                 try { w.close(); } catch (_) {}
