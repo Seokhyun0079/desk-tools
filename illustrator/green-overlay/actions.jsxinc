@@ -1,0 +1,212 @@
+﻿// Green Overlay: actions (included by green-overlay.jsx)
+        destinationTree.onChange = function () {
+            try {
+                if (destinationTree.selection !== null) {
+                    statusText.text =
+                        "作成先: " + destinationTree.selection.text;
+                }
+                updateRunState();
+            } catch (e) {
+                showError(e);
+            }
+        };
+
+        function updateLayerTargetButton() {
+            layerTargetButton.enabled = !loading && activeLayerEntry !== null;
+            layerTargetButton.text = activeLayerEntry && picked[activeLayerEntry.id]
+                ? "レイヤー対象を解除" : "レイヤー全体を対象にする";
+        }
+
+        layerTargetButton.onClick = function () {
+            if (loading || !activeLayerEntry) return;
+            var entry = activeLayerEntry;
+            try {
+                var turnOn = !picked[entry.id];
+                picked[entry.id] = turnOn;
+                refreshVisibleObjectRows();
+                updateCountAndInfo(entry.ref);
+                if (turnOn) requestCanvasFollow(entry);
+                statusText.text = turnOn
+                    ? "レイヤーを対象にしました。範囲は実行時に取得します。"
+                    : "レイヤー対象を解除しました。";
+            } catch (e) { showError(e); }
+            finally { updateLayerTargetButton(); }
+        };
+
+        function handleObjectListEvent() {
+            try {
+                var row, entry, i;
+
+                if (suppressObjectEvent > 0 || inObjectListHandler) return;
+                inObjectListHandler = true;
+
+                row = objectList.selection;
+                if (row === null) {
+                    inObjectListHandler = false;
+                    return;
+                }
+
+                entry = row._entry;
+                if (!entry) {
+                    inObjectListHandler = false;
+                    return;
+                }
+
+                // A layer row still belongs to native disclosure. The separate
+                // toolbar button chooses the layer without changing this tree.
+                activeLayerEntry = entry.itemType === "Layer" ? entry : null;
+                updateLayerTargetButton();
+                if (activeLayerEntry) {
+                    infoText.text = "レイヤー: " + entry.label +
+                        "\n「レイヤー全体を対象にする」で範囲全体を選択できます。";
+                }
+
+                if (entry.descendantToggle) {
+                    var parentEntry = entry.parentEntry;
+                    var turnOn = descendantSelectionState(parentEntry) !== 2;
+                    setDescendantsPicked(parentEntry, turnOn);
+                    refreshVisibleObjectRows();
+                    updateCountAndInfo(null);
+                    statusText.text = turnOn
+                        ? "配下をすべて選択しました。"
+                        : "配下をすべて解除しました。";
+                    suppressObjectEvent++;
+                    try { objectList.selection = null; } catch (_) {}
+                    suppressObjectEvent--;
+                    inObjectListHandler = false;
+                    return;
+                }
+
+                if (entry.selectable) {
+                    picked[entry.id] = !picked[entry.id];
+                    refreshVisibleObjectRows();
+                    updateCountAndInfo(entry.ref);
+                    try { applyIllustratorSelection(entry); } catch (_) {}
+                    if (picked[entry.id]) requestCanvasFollow(entry);
+                    suppressObjectEvent++;
+                    try { objectList.selection = null; } catch (_) {}
+                    suppressObjectEvent--;
+                    inObjectListHandler = false;
+                    return;
+                }
+
+                // Container disclosure is handled exclusively by the native TreeView.
+                inObjectListHandler = false;
+            } catch (e) {
+                inObjectListHandler = false;
+                showError(e);
+            }
+        }
+
+        objectList.onClick = null;
+        objectList.onChange = handleObjectListEvent;
+
+        selectAllButton.onClick = function () {
+            try {
+                loadAllTargets(objectRoots);
+                var i, entry;
+
+                for (i = 0; i < objectEntries.length; i++) {
+                    entry = objectEntries[i];
+                    if (entry.selectable) {
+                        picked[entry.id] = true;
+                    }
+                }
+
+                refreshVisibleObjectRows();
+                try {
+                    for (i = 0; i < objectEntries.length; i++) {
+                        entry = objectEntries[i];
+                        if (entry.selectable) {
+                            try { entry.ref.selected = true; } catch (e) { logEvent("selection.all", e, entry.ref); }
+                        }
+                    }
+                } catch (_) {}
+                updateCountAndInfo(null);
+                statusText.text = "すべて選択しました。";
+            } catch (e) {
+                showError(e);
+            }
+        };
+
+        clearButton.onClick = function () {
+            try {
+                picked = {};
+                refreshVisibleObjectRows();
+                updateLayerTargetButton();
+                try { doc.selection = null; } catch (_) {}
+                updateCountAndInfo(null);
+                statusText.text = "すべて解除しました。";
+            } catch (e) {
+                showError(e);
+            }
+        };
+
+        runButton.onClick = function () {
+            try {
+                var destinationNode = destinationTree.selection;
+                if (destinationNode === null) {
+                    alert("作成先を選択してください。");
+                    return;
+                }
+
+                var destinationIndex = destinationNode._destinationIndex;
+                var destInfo = destinationRefs[destinationIndex];
+
+                if (!destInfo || !destInfo.ref) {
+                    alert("作成先を取得できません。");
+                    return;
+                }
+
+                try {
+                    if (destInfo.ref.locked) {
+                        alert("作成先がロックされています。");
+                        return;
+                    }
+                } catch (_) {}
+
+                var settings = overlaySettings();
+                if (!settings) {
+                    alert("RGB は 0〜255、不透明度は 0〜100 の数値で入力してください。");
+                    return;
+                }
+
+                var count = selectedCount();
+                if (!count) {
+                    alert("対象オブジェクトを選択してください。");
+                    return;
+                }
+
+                if (!confirm(
+                    count +
+                    "件のオブジェクト上に矩形を作成します。\n" +
+                    "RGB: " + settings.r + ", " + settings.g + ", " + settings.b +
+                    " / 不透明度: " + settings.opacity + "%\n" +
+                    "実行しますか？"
+                )) {
+                    return;
+                }
+
+                syncIllustratorSelectionFromPicked();
+                sendBridgeTalk(buildExecuteScript(destInfo, settings));
+                statusText.text = "作成を実行しました。";
+            } catch (e) {
+                showError(e);
+            }
+        };
+
+        w.onResizing = w.onResize = function () {
+            this.layout.resize();
+        };
+
+        w.onClose = function () {
+            try {
+                loading = false;
+                $.global.__greenOverlayDiagnostic = null;
+                $.global.__greenOverlayWindow = null;
+                try { w.hide(); } catch (_) {}
+                try { w.close(); } catch (_) {}
+            } catch (_) {}
+            return true;
+        };
+

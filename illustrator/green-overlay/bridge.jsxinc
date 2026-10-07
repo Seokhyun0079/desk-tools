@@ -1,0 +1,66 @@
+﻿// Green Overlay: bridge (included by green-overlay.jsx)
+        function activeView() {
+            try {
+                if (doc.activeView) return doc.activeView;
+            } catch (_) {}
+            if (doc.views.length > 0) return doc.views[0];
+            return null;
+        }
+
+        function zOrderOf(item) {
+            try { return item.absoluteZOrderPosition; } catch (_) { return null; }
+        }
+
+        function currentZoom() {
+            try {
+                var view = activeView();
+                if (view && view.zoom) return view.zoom;
+            } catch (_) {}
+            return cachedZoom;
+        }
+
+        function sendBridgeTalk(code, onResult) {
+            var bt = new BridgeTalk();
+            try {
+                bt.target = BridgeTalk.appSpecifier || "illustrator";
+            } catch (_) {
+                bt.target = "illustrator";
+            }
+            bt.body = code;
+            bt.onError = function (message) { logEvent("bridgetalk.error", message.body); };
+            if (onResult) bt.onResult = onResult;
+            if (!bt.send()) logEvent("bridgetalk.send", "Message could not be sent");
+        }
+
+        function panToPointScript(x, y, zoom) {
+            return (
+                "(function(){" +
+                "if(!app.documents.length)return;" +
+                "var doc=app.activeDocument;" +
+                "var v=doc.views[0];" +
+                "try{if(doc.activeView)v=doc.activeView;}catch(e0){}" +
+                "var p=[" + jsNumber(x) + "," + jsNumber(y) + "];" +
+                "v.centerPoint=p;" +
+                "try{v.zoom=" + jsNumber(zoom) + ";}catch(e1){}" +
+                "})();"
+            );
+        }
+
+        function requestCanvasFollow(entry) {
+            if (!entry || !entry.ref) return;
+            if (entry.itemType === "Layer") {
+                requestLayerCanvasFollow(entry);
+                return;
+            }
+            try {
+                var b = boundsOf(entry.ref);
+                sendBridgeTalk(
+                    panToPointScript(
+                        (b.left + b.right) / 2,
+                        (b.top + b.bottom) / 2,
+                        currentZoom()
+                    )
+                );
+            } catch (e) { logEvent("view.follow", e, entry.ref); }
+        }
+

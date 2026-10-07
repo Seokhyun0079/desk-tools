@@ -1,0 +1,361 @@
+﻿// Green Overlay: tree (included by green-overlay.jsx)
+        function addDestinationBranch(entries, uiParent) {
+            for (var i = 0; i < entries.length; i++) {
+                var entry = entries[i];
+                if (!isDestination(entry.ref)) continue;
+                var kids = [];
+                for (var j = 0; j < entry.children.length; j++) {
+                    if (isDestination(entry.children[j].ref)) kids.push(entry.children[j]);
+                }
+                var node = uiParent.add(kids.length ? "node" : "item", entry.label + "  [" + kindLabel(entry.ref) + "]");
+                node._destinationIndex = destinationRefs.length;
+                var info = {ref: entry.ref, z: entry.zOrder, type: entry.itemType, name: ""};
+                try { info.name = String(entry.ref.name); } catch (_) {}
+                destinationRefs.push(info);
+                if (kids.length) {
+                    addDestinationBranch(kids, node);
+                    node.expanded = false;
+                }
+            }
+        }
+
+        // Both native trees share one model; leaf objects do not scan child collections.
+        function collectObjectBranch(container, depth) {
+            var children = directChildren(container);
+            var nodes = [], counts = {};
+            for (var i = 0; i < children.length; i++) {
+                var item = children[i];
+                var structural = isStructuralContainer(item);
+                var entry = {
+                    id: objectEntries.length, ref: item, depth: depth,
+                    selectable: !structural, expanded: false, children: [],
+                    childrenLoaded: !structural,
+                    label: labeledName(item, counts),
+                    zOrder: zOrderOf(item), itemType: typeOf(item)
+                };
+                objectEntries.push(entry);
+                nodes.push(entry);
+            }
+            return nodes;
+        }
+
+        function ensureObjectChildren(entry) {
+            if (entry.childrenLoaded) return;
+            var started = new Date().getTime();
+            entry.children = collectObjectBranch(entry.ref, entry.depth + 1);
+            entry.childrenLoaded = true;
+            logEvent("children.loaded", "elapsedMs=" + (new Date().getTime() - started) + " count=" + entry.children.length, entry.ref);
+        }
+
+        function loadAllTargets(nodes) {
+            for (var i = 0; i < nodes.length; i++) {
+                var entry = nodes[i];
+                if (!entry.selectable) {
+                    ensureObjectChildren(entry);
+                    loadAllTargets(entry.children);
+                }
+            }
+        }
+
+        function addObjectNodes(entries, parent) {
+            for (var i = 0; i < entries.length; i++) {
+                var entry = entries[i];
+                var node = parent.add(entry.children.length ? "node" : "item", objectRowText(entry));
+                node._entry = entry;
+                entry.ui = node;
+                objectRows.push({ui: node, entry: entry});
+                if (entry.children.length) {
+                    var toggle = node.add("item", "☐ 配下を全選択 / 全解除");
+                    toggle._entry = {descendantToggle: true, parentEntry: entry};
+                    objectRows.push({ui: toggle, entry: toggle._entry});
+                    addObjectNodes(entry.children, node);
+                    node.expanded = false;
+                }
+            }
+        }
+
+        function paintObjectList() {
+            suppressObjectEvent++;
+            try {
+                objectList.removeAll();
+                objectRows = [];
+                addObjectNodes(objectRoots, objectList);
+            } finally { suppressObjectEvent--; }
+        }
+
+        function refreshVisibleObjectRows() {
+            for (var i = 0; i < objectRows.length; i++) {
+                var row = objectRows[i], entry = row.entry;
+                if (entry.descendantToggle) {
+                    var state = descendantSelectionState(entry.parentEntry);
+                    row.ui.text = (state === 2 ? "☑ " : (state === 1 ? "◩ " : "☐ ")) + "配下を全選択 / 全解除";
+                } else {
+                    row.ui.text = objectRowText(entry);
+                }
+            }
+        }
+
+        var loading = false;
+        var loadToken = String(new Date().getTime()) + ":" + Math.random();
+        var scanJobs = [], uiJobs = [], ticks = 0, scanned = 0;
+        var typedProps = ["groupItems", "compoundPathItems", "pathItems", "textFrames", "placedItems", "rasterItems", "symbolItems", "meshItems", "pluginItems", "graphItems", "nonNativeItems", "legacyTextItems"];
+        // Mixed containers need every typed collection, including linked/embedded
+        // images and symbols. Keep only direct children and remove duplicates.
+        var supplementProps = typedProps;
+        var nodesToCollapse = [];
+
+        function captureDiagnosticCounts() {
+            var counts = {};
+            for (var i = 0; i < objectEntries.length; i++) {
+                // itemType was cached by the existing loader. Do not make new
+                // Illustrator DOM calls just to prepare a diagnostic report.
+                var t = objectEntries[i].itemType || "Unknown";
+                counts[t] = (counts[t] || 0) + 1;
+            }
+            $.global.__greenOverlayDiagnostic = {schema: "overlay-counts-v1", state: "ready", counts: counts};
+        }
+
+        function enableLists(value) {
+            destinationTree.enabled = objectList.enabled = value;
+            selectAllButton.enabled = clearButton.enabled = value;
+            runButton.enabled = false;
+            cancelLoadButton.enabled = !value;
+            layerTargetButton.enabled = value && activeLayerEntry !== null;
+        }
+
+        function scanJob(ref, depth, out, layerPath) {
+            var t = typeOf(ref);
+            var props = t === "Document" ? ["layers"] :
+                (t === "CompoundPathItem" ? ["pathItems"] :
+                    (t === "Layer" ? ["layers", "pageItems"] : ["pageItems"]));
+            return {ref: ref, depth: depth, out: out, layerPath: layerPath || [], layerAddresses: [], props: props, prop: 0,
+                col: null, index: 0, length: 0, refs: [], seen: {}, counts: {}, stage: 0, build: 0};
+        }
+
+        // A BridgeTalk callback can run while the open file is temporarily "not a document".
+        // Layer reads there finish as an empty tree and the status still says ready.
+        // Read the hierarchy in this turn, after the window is visible.
+        function runLoadInline() {
+            try {
+                while (loading) loadStep(loadToken);
+            } catch (e) {
+                stopLoading("読み込みに失敗しました。", e);
+                showError(e);
+            }
+        }
+
+        function collapseFinishedNodes() {
+            for (var i = nodesToCollapse.length - 1; i >= 0; i--) {
+                try { nodesToCollapse[i].expanded = false; } catch (_) {}
+            }
+            nodesToCollapse = [];
+        }
+
+        function relayout() {
+            try { w.layout.layout(true); } catch (e) { logEvent("ui.layout", e); }
+            try { destinationTree.layout.layout(true); } catch (_) {}
+            try { objectList.layout.layout(true); } catch (_) {}
+            try { w.update(); } catch (_) {}
+        }
+
+        function layerLength(target) {
+            try {
+                var layers = target.layers;
+                if (!layers || typeof layers.length !== "number") return -1;
+                return layers.length;
+            } catch (e) {
+                logEvent("children.layers", e, target);
+                return -1;
+            }
+        }
+
+        function useReadableDocument() {
+            if (layerLength(doc) > 0) return true;
+            try {
+                var active = app.activeDocument;
+                if (active && layerLength(active) > 0) {
+                    doc = active;
+                    logEvent("startup.document", "rebound");
+                    return true;
+                }
+            } catch (e) {
+                logEvent("startup.document", e);
+            }
+            return false;
+        }
+
+        function stopLoading(message, error) {
+            loading = false;
+            enableLists(false);
+            cancelLoadButton.enabled = false;
+            statusText.text = message;
+            logEvent(error ? "startup.failed" : "startup.cancelled", error || "User cancelled");
+        }
+
+        cancelLoadButton.onClick = function () { stopLoading("読み込みを中止しました。再実行してください。"); };
+
+        function readOne(job) {
+            if (job.prop < job.props.length) {
+                var prop = job.props[job.prop];
+                if (!job.col) {
+                    try { job.col = job.ref[prop]; job.length = job.col ? job.col.length : 0; }
+                    catch (e) { logEvent("children." + prop, e, job.ref); job.length = 0; }
+                }
+                if (job.index < job.length) {
+                    try {
+                        var itemIndex = job.index;
+                        var item = job.col[job.index++];
+                        if (prop === "layers") {
+                            job.layerAddresses.push({ref: item, path: job.layerPath.concat([itemIndex])});
+                        }
+                        if (prop === "layers" || typeOf(job.ref) === "CompoundPathItem" || job.stage >= 2 || isDirectChild(item, job.ref)) {
+                            pushUnique(job.refs, job.seen, item);
+                        }
+                        scanned++;
+                    } catch (e) { logEvent("children.item", e, job.ref); }
+                    return false;
+                }
+                job.prop++; job.col = null; job.index = 0;
+                return false;
+            }
+            if (job.stage < 1 && typeOf(job.ref) !== "Document" && typeOf(job.ref) !== "CompoundPathItem") {
+                job.stage = 1; job.props = supplementProps; job.prop = 0;
+                return false;
+            }
+            // Last resort for hosts whose direct-child test rejects every item.
+            if (job.stage < 2 && typeOf(job.ref) !== "Document" && typeOf(job.ref) !== "CompoundPathItem" && artItemCount(job.refs) === 0) {
+                job.stage = 2; job.props = typedProps; job.prop = 0;
+                return false;
+            }
+            if (!job.sorted) {
+                sortByStack(job.refs); job.sorted = true;
+            }
+            if (job.build < job.refs.length) {
+                var ref = job.refs[job.build++], structural = isStructuralContainer(ref);
+                var entry = {id: objectEntries.length, ref: ref, depth: job.depth,
+                    selectable: !structural, expanded: false, children: [], childrenLoaded: true,
+                    label: labeledName(ref, job.counts), zOrder: zOrderOf(ref), itemType: typeOf(ref)};
+                if (entry.itemType === "Layer") {
+                    for (var a = 0; a < job.layerAddresses.length; a++) {
+                        if (sameItem(job.layerAddresses[a].ref, ref)) {
+                            entry.layerPath = job.layerAddresses[a].path;
+                            break;
+                        }
+                    }
+                    try { entry.layerName = String(ref.name); } catch (_) { entry.layerName = null; }
+                }
+                objectEntries.push(entry); job.out.push(entry);
+                if (structural) scanJobs.unshift(scanJob(ref, job.depth + 1, entry.children, entry.layerPath || job.layerPath));
+                return false;
+            }
+            return true;
+        }
+
+        function drawOne(job) {
+            var entry = job.entry;
+            var node = job.objectParent.add(entry.children.length ? "node" : "item", objectRowText(entry));
+            // Expand only after a real child exists; an empty node may ignore it.
+            if (job.objectParent !== objectList) job.objectParent.expanded = true;
+            node._entry = entry; entry.ui = node;
+            objectRows.push({ui: node, entry: entry});
+            if (entry.children.length) {
+                nodesToCollapse.push(node);
+                var toggle = node.add("item", "☐ 配下を全選択 / 全解除");
+                node.expanded = true;
+                toggle._entry = {descendantToggle: true, parentEntry: entry};
+                objectRows.push({ui: toggle, entry: toggle._entry});
+            }
+            var destParent = job.destParent;
+            if (isDestination(entry.ref)) {
+                var hasDest = false;
+                for (var k = 0; k < entry.children.length; k++) {
+                    if (isDestination(entry.children[k].ref)) { hasDest = true; break; }
+                }
+                var dest = destParent.add(hasDest ? "node" : "item", entry.label + "  [" + kindLabel(entry.ref) + "]");
+                if (destParent !== destinationTree) destParent.expanded = true;
+                dest._destinationIndex = destinationRefs.length;
+                var info = {ref: entry.ref, z: entry.zOrder, type: entry.itemType, name: ""};
+                try { info.name = String(entry.ref.name); } catch (_) {}
+                destinationRefs.push(info);
+                if (hasDest) {
+                    nodesToCollapse.push(dest);
+                }
+                destParent = dest;
+            }
+            for (var i = entry.children.length - 1; i >= 0; i--) {
+                uiJobs.push({entry: entry.children[i], objectParent: node, destParent: destParent});
+            }
+        }
+
+        function capturedDocumentClosed() {
+            try {
+                return !app.documents.length;
+            } catch (_) {
+                return false;
+            }
+        }
+
+        function loadStep(token) {
+            if (!loading || token !== loadToken) return;
+            try {
+                if (capturedDocumentClosed()) {
+                    stopLoading("ドキュメントが変わりました。再実行してください。"); return;
+                }
+                var started = new Date().getTime(), units = 0;
+                while (units++ < 64 && new Date().getTime() - started < 20) {
+                    if (scanJobs.length) {
+                        var job = scanJobs[0];
+                        if (readOne(job)) {
+                            // Child jobs may have been prepended during the previous unit.
+                            scanJobs.shift();
+                        }
+                    } else {
+                        if (!uiStarted) {
+                            uiStarted = true;
+                            for (var i = objectRoots.length - 1; i >= 0; i--) {
+                                uiJobs.push({entry: objectRoots[i], objectParent: objectList, destParent: destinationTree});
+                            }
+                        }
+                        if (!uiJobs.length) {
+                            loading = false; enableLists(true); updateRunState();
+                            collapseFinishedNodes();
+                            relayout();
+                            captureDiagnosticCounts();
+                            statusText.text = objectRoots.length
+                                ? "準備完了"
+                                : "レイヤーを読み取れませんでした。再実行してください。";
+                            logEvent("startup.ready", "elapsedMs=" + (new Date().getTime() - sessionStarted) + " entries=" + objectEntries.length + " roots=" + objectRoots.length);
+                            return;
+                        }
+                        drawOne(uiJobs.pop());
+                    }
+                }
+                var frames = ["◐", "◓", "◑", "◒"];
+                statusText.text = frames[ticks++ % 4] + (uiStarted ? " 一覧を作成中… " : " 読み込み中… ") + objectEntries.length + "件 / 調査 " + scanned + "件";
+                w.update();
+            } catch (e) { stopLoading("読み込みに失敗しました。", e); showError(e); }
+        }
+        var uiStarted = false;
+
+        function rebuildTrees() {
+            $.global.__greenOverlayDiagnostic = {schema: "overlay-counts-v1", state: "loading", counts: {}};
+            destinationRefs = []; objectEntries = []; objectRoots = []; objectRows = []; picked = {};
+            activeLayerEntry = null;
+            updateLayerTargetButton();
+            destinationTree.removeAll(); objectList.removeAll();
+            nodesToCollapse = [];
+            loading = true; enableLists(false);
+            if (!useReadableDocument()) {
+                loading = false;
+                enableLists(false);
+                cancelLoadButton.enabled = false;
+                statusText.text = "レイヤーを読み取れませんでした。再実行してください。";
+                logEvent("startup.failed", "No readable layers");
+                relayout();
+                return;
+            }
+            scanJobs = [scanJob(doc, 0, objectRoots)]; uiJobs = []; uiStarted = false;
+            statusText.text = "読み込み中…";
+            runLoadInline();
+        }
+

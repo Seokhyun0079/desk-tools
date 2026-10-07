@@ -1,0 +1,392 @@
+﻿// Green Overlay: model (included by green-overlay.jsx)
+        function typeOf(item) {
+            try { return item.typename; } catch (_) { return ""; }
+        }
+
+        function kindLabel(item) {
+            var t = typeOf(item);
+            if (t === "Layer") return "レイヤー";
+            if (t === "GroupItem") return "グループ";
+            if (t === "PathItem") return "パス";
+            if (t === "CompoundPathItem") return "複合パス";
+            if (t === "TextFrame") return "テキスト";
+            if (t === "PlacedItem") return "配置画像";
+            if (t === "RasterItem") return "画像";
+            if (t === "SymbolItem") return "シンボル";
+            if (t === "MeshItem") return "メッシュ";
+            if (t === "PluginItem") return "プラグイン項目";
+            if (t === "GraphItem") return "グラフ";
+            return t || "オブジェクト";
+        }
+
+        function cleanText(s) {
+            if (s === null || s === undefined) return "";
+            s = String(s);
+            s = s.replace(/\r\n/g, " ").replace(/\n/g, " ").replace(/\r/g, " ").replace(/\t/g, " ");
+            while (s.indexOf("  ") >= 0) s = s.replace("  ", " ");
+            return s.replace(/^ +/, "").replace(/ +$/, "");
+        }
+
+        function shorten(s, maxLen) {
+            if (!s) return "";
+            if (s.length <= maxLen) return s;
+            return s.substring(0, maxLen - 1) + "…";
+        }
+
+        function isUsefulName(name) {
+            name = cleanText(name);
+            if (!name) return false;
+            if (name.charAt(0) === "<" && name.charAt(name.length - 1) === ">") return false;
+            return true;
+        }
+
+        function fileNameOf(item) {
+            try {
+                if (item.file && item.file.name) return item.file.name;
+            } catch (_) {}
+            return "";
+        }
+
+        function swatchNameOf(item) {
+            try {
+                if (!item.filled) return "";
+                var c = item.fillColor;
+                if (!c) return "";
+                if (c.typename === "SpotColor" && c.spot && c.spot.name) return c.spot.name;
+                if (c.typename === "PatternColor" && c.pattern && c.pattern.name) return c.pattern.name;
+                if (c.typename === "GradientColor" && c.gradient && c.gradient.name) return c.gradient.name;
+            } catch (_) {}
+            return "";
+        }
+
+        function displayName(item, fallback) {
+            var t = typeOf(item);
+            var n = "";
+            var extra;
+
+            try { n = item.name; } catch (_) {}
+            if (isUsefulName(n)) return cleanText(n);
+
+            try {
+                if (isUsefulName(item.note)) return shorten(cleanText(item.note), 32);
+            } catch (_) {}
+
+            if (t === "TextFrame") {
+                try {
+                    extra = cleanText(item.contents);
+                    if (extra) return shorten(extra, 32);
+                } catch (_) {}
+            }
+
+            if (t === "PlacedItem" || t === "RasterItem") {
+                extra = fileNameOf(item);
+                if (extra) return extra;
+            }
+
+            if (t === "SymbolItem") {
+                try {
+                    if (item.symbol && isUsefulName(item.symbol.name)) {
+                        return item.symbol.name;
+                    }
+                } catch (_) {}
+            }
+
+            if (t === "GroupItem") {
+                try {
+                    if (item.clipped) return "クリップグループ";
+                } catch (_) {}
+            }
+
+            if (t === "PathItem") {
+                try {
+                    if (item.clipping) return "クリッピングパス";
+                } catch (_) {}
+                extra = swatchNameOf(item);
+                if (extra) return extra;
+            }
+
+            return fallback;
+        }
+
+        function indentText(depth) {
+            var s = "";
+            var i;
+            for (i = 0; i < depth; i++) s += "    ";
+            return s;
+        }
+
+        function jsNumber(n) {
+            if (isNaN(n)) return "0";
+            return String(Math.round(n * 1000) / 1000);
+        }
+
+        function sameItem(a, b) {
+            if (!a || !b) return false;
+            try { if (a === b) return true; } catch (_) {}
+            try { if (a == b) return true; } catch (_) {}
+            try {
+                if (a.typename !== b.typename) return false;
+            } catch (_) {
+                return false;
+            }
+            try {
+                var au = a.uuid, bu = b.uuid;
+                if (typeof au === "string" && au && typeof bu === "string" && bu) return au === bu;
+            } catch (_) {}
+            try {
+                var az = a.absoluteZOrderPosition, bz = b.absoluteZOrderPosition;
+                if (typeof az === "number" && typeof bz === "number" && az === bz) return true;
+            } catch (_) {}
+            return false;
+        }
+
+        function itemKey(item) {
+            var t = typeOf(item), value;
+            try {
+                value = item.uuid;
+                if (typeof value === "string" && value) return t + "@uuid:" + value;
+            } catch (_) {}
+            try {
+                value = item.absoluteZOrderPosition;
+                if (typeof value === "number" && isFinite(value)) return t + "#" + value;
+            } catch (_) {}
+            try {
+                value = item.zOrderPosition;
+                if (typeof value === "number" && isFinite(value)) return t + "@local:" + value;
+            } catch (_) {}
+            return "";
+        }
+
+        function pushUnique(result, seen, item) {
+            var key = itemKey(item);
+            if (key) {
+                if (seen[key]) return;
+                seen[key] = true;
+            } else {
+                // Undefined metadata is not an identity. Retain distinct artwork
+                // and only remove repeated host references when no key exists.
+                for (var i = 0; i < result.length; i++) {
+                    if (sameItem(result[i], item)) return;
+                }
+            }
+            result.push(item);
+        }
+
+        function parentOf(item) {
+            try { return item.parent; } catch (_) { return null; }
+        }
+
+        function isDirectChild(item, container) {
+            var p = parentOf(item);
+            var clipped = false;
+            var pt;
+
+            if (!p) {
+                try {
+                    if (typeOf(container) === "GroupItem" && container.clipped && item.clipping) return true;
+                } catch (_) {}
+                return false;
+            }
+            if (sameItem(p, container)) return true;
+
+            try {
+                clipped = typeOf(container) === "GroupItem" && container.clipped;
+            } catch (_) {}
+
+            if (!clipped) return false;
+
+            try {
+                pt = typeOf(p);
+                if (pt === "Layer" || pt === "Document") return true;
+            } catch (_) {}
+
+            return false;
+        }
+
+        function addCollectionItems(container, prop, result, seen, requireDirect) {
+            var col, i, item, length;
+            try {
+                col = container[prop];
+                if (!col) return;
+                length = col.length;
+                for (i = 0; i < length; i++) {
+                    item = col[i];
+                    if (!requireDirect || isDirectChild(item, container)) {
+                        pushUnique(result, seen, item);
+                    }
+                }
+            } catch (e) { logEvent("children." + prop, e, container); }
+        }
+
+        function addTypedChildren(container, result, seen, requireDirect) {
+            var props = [
+                "groupItems",
+                "compoundPathItems",
+                "pathItems",
+                "textFrames",
+                "placedItems",
+                "rasterItems",
+                "symbolItems",
+                "meshItems",
+                "pluginItems",
+                "graphItems",
+                "nonNativeItems",
+                "legacyTextItems"
+            ];
+            var i;
+            for (i = 0; i < props.length; i++) {
+                addCollectionItems(container, props[i], result, seen, requireDirect);
+            }
+        }
+
+        function sortByStack(items) {
+            items.sort(function (a, b) {
+                var za = 0;
+                var zb = 0;
+                try {
+                    za = a.absoluteZOrderPosition;
+                    zb = b.absoluteZOrderPosition;
+                    return zb - za;
+                } catch (_) {}
+                try {
+                    za = a.zOrderPosition;
+                    zb = b.zOrderPosition;
+                    return za - zb;
+                } catch (__) {}
+                return 0;
+            });
+        }
+
+        function artItemCount(items) {
+            var n = 0;
+            var i;
+            for (i = 0; i < items.length; i++) {
+                if (typeOf(items[i]) !== "Layer") n++;
+            }
+            return n;
+        }
+
+        function directChildren(container) {
+            var result = [];
+            var seen = {};
+            var i, t;
+
+            t = typeOf(container);
+
+            if (t === "Document") {
+                try {
+                    for (i = 0; i < container.layers.length; i++) {
+                        result.push(container.layers[i]);
+                    }
+                } catch (_) {}
+                return result;
+            }
+
+            if (t === "CompoundPathItem") {
+                addCollectionItems(container, "pathItems", result, seen, false);
+                return result;
+            }
+
+            if (t === "Layer") {
+                try {
+                    for (i = 0; i < container.layers.length; i++) {
+                        pushUnique(result, seen, container.layers[i]);
+                    }
+                } catch (_) {}
+            }
+
+            addCollectionItems(container, "pageItems", result, seen, true);
+
+            addTypedChildren(container, result, seen, true);
+
+            if (artItemCount(result) === 0) {
+                addCollectionItems(container, "groupItems", result, seen, false);
+                addCollectionItems(container, "compoundPathItems", result, seen, false);
+            }
+
+            if (artItemCount(result) === 0) {
+                addTypedChildren(container, result, seen, false);
+            }
+
+            sortByStack(result);
+            return result;
+        }
+
+        function isDestination(item) {
+            var t = typeOf(item);
+            return t === "Layer" || t === "GroupItem";
+        }
+
+        function destinationChildren(container) {
+            var result = [];
+            var children = directChildren(container);
+            var i;
+            for (i = 0; i < children.length; i++) {
+                if (isDestination(children[i])) result.push(children[i]);
+            }
+            return result;
+        }
+
+        function isStructuralContainer(item) {
+            var t = typeOf(item);
+            return t === "Layer" || t === "GroupItem" || t === "CompoundPathItem";
+        }
+
+        function labeledName(item, counts) {
+            var kind = kindLabel(item);
+            if (!counts[kind]) counts[kind] = 0;
+            counts[kind]++;
+            return displayName(item, kind + " " + counts[kind]);
+        }
+
+        function descendantSelectionState(entry) {
+            var total = 0, selected = 0;
+
+            function walk(nodes) {
+                var i, child;
+                for (i = 0; i < nodes.length; i++) {
+                    child = nodes[i];
+                    if (child.selectable) {
+                        total++;
+                        if (picked[child.id]) selected++;
+                    } else if (!child.childrenLoaded) {
+                        // Unknown descendants must not be treated as fully selected.
+                        total++;
+                    } else if (child.children.length > 0) {
+                        walk(child.children);
+                    }
+                }
+            }
+
+            walk(entry.children);
+            if (total === 0 || selected === 0) return 0;
+            if (selected === total) return 2;
+            return 1;
+        }
+
+        function objectRowText(entry) {
+            var check = "";
+
+            if (entry.selectable) {
+                check = picked[entry.id] ? "☑ " : "☐ ";
+            }
+
+            return check +
+                entry.label + "  [" + kindLabel(entry.ref) + "]" +
+                (entry.itemType === "Layer" && picked[entry.id] ? " （対象）" : "");
+        }
+
+        function setDescendantsPicked(entry, value) {
+            ensureObjectChildren(entry);
+            var i, child;
+            for (i = 0; i < entry.children.length; i++) {
+                child = entry.children[i];
+                if (child.selectable) {
+                    picked[child.id] = value;
+                    try { child.ref.selected = value; } catch (e) { logEvent("selection.descendants", e, child.ref); }
+                } else if (isStructuralContainer(child.ref)) {
+                    setDescendantsPicked(child, value);
+                }
+            }
+        }
+
