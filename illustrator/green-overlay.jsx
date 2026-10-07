@@ -55,6 +55,7 @@
         var objectRoots = [];
         var objectRows = [];
         var picked = {};
+        var activeLayerEntry = null;
         var suppressObjectEvent = 0;
         var inObjectListHandler = false;
         var cachedZoom = 1;
@@ -210,12 +211,21 @@
         // execution refreshes the same calculation from the live DOM before
         // any overlay is created. Never select, group, or move the source art.
         function layerArtworkBounds(root, useModel) {
+            var unknownVisibility = 0;
             function refOf(node) { return useModel ? node.ref : node; }
+            function nodeType(node) { return useModel ? node.itemType : typeOf(node); }
             function childrenOf(node) { return useModel ? node.children : directChildren(node); }
-            function hidden(ref) {
+            function hidden(ref, t) {
+                if (!ref || !t || t === "Document" || t === "Application") return false;
                 try {
-                    return typeOf(ref) === "Layer" ? ref.visible === false : ref.hidden === true;
-                } catch (_) { throw new Error("表示状態を取得できません。"); }
+                    return t === "Layer" ? ref.visible === false : ref.hidden === true;
+                } catch (_) {
+                    // Unavailable visibility is unknown, not proof of hidden art.
+                    // Keep readable bounds and report uncertainty without losing
+                    // the whole layer target or changing its child rows.
+                    unknownVisibility++;
+                    return false;
+                }
             }
             function normalized(b) {
                 if (!b || b.length !== 4) return null;
@@ -241,7 +251,7 @@
                     Math.max(a[2], b[2]), Math.min(a[3], b[3])];
             }
             function clipping(node) {
-                var ref = refOf(node), t = typeOf(ref);
+                var ref = refOf(node), t = nodeType(node);
                 if (t === "PathItem") {
                     try { return ref.clipping === true; } catch (_) { return false; }
                 }
@@ -254,8 +264,8 @@
                 return false;
             }
             function walk(node) {
-                var ref = refOf(node), t = typeOf(ref);
-                if (hidden(ref)) return null;
+                var ref = refOf(node), t = nodeType(node);
+                if (hidden(ref, t)) return null;
                 if (t === "Layer" || t === "GroupItem") {
                     var kids = childrenOf(node), result = null, clip = null, clipped = false;
                     try { clipped = t === "GroupItem" && ref.clipped; } catch (_) {}
@@ -277,12 +287,17 @@
                 try { if (t === "PathItem" && ref.guides) return null; } catch (_) {}
                 return rectOf(ref, false);
             }
-            var ancestor = refOf(root);
-            while (ancestor && typeOf(ancestor) !== "Document") {
-                if (hidden(ancestor)) return null;
+            var ancestor = refOf(root), ancestorType = nodeType(root);
+            if (useModel) root.visibilityUnknown = 0;
+            while (ancestor && ancestorType && ancestorType !== "Document" && ancestorType !== "Application") {
+                if (hidden(ancestor, ancestorType)) return null;
                 ancestor = parentOf(ancestor);
+                ancestorType = typeOf(ancestor);
             }
-            return walk(root);
+            var result = walk(root);
+            if (useModel) root.visibilityUnknown = unknownVisibility;
+            if (unknownVisibility) logEvent("bounds.visibility", "Unknown visibility included: " + unknownVisibility);
+            return result;
         }
 
         function indentText(depth) {
@@ -549,7 +564,8 @@
             }
 
             return check +
-                entry.label + "  [" + kindLabel(entry.ref) + "]";
+                entry.label + "  [" + kindLabel(entry.ref) + "]" +
+                (entry.itemType === "Layer" && picked[entry.id] ? " （対象）" : "");
         }
 
         function setDescendantsPicked(entry, value) {
@@ -625,6 +641,11 @@
         var countText = toolbar.add("statictext", undefined, "0件選択");
         countText.characters = 16;
 
+
+        var layerToolbar = objectPanel.add("group");
+        layerToolbar.orientation = "row";
+        var layerTargetButton = layerToolbar.add("button", undefined, "レイヤー全体を対象にする");
+        layerTargetButton.enabled = false;
 
         // Both lists use native TreeView disclosure buttons.
         var objectList = objectPanel.add("treeview", undefined, []);
@@ -855,8 +876,7 @@
         function addObjectNodes(entries, parent) {
             for (var i = 0; i < entries.length; i++) {
                 var entry = entries[i];
-                var node = parent.add(entry.children.length || entry.itemType === "Layer" ? "node" : "item", objectRowText(entry));
-                if (parent !== objectList) parent.expanded = true;
+                var node = parent.add(entry.children.length ? "node" : "item", objectRowText(entry));
                 node._entry = entry;
                 entry.ui = node;
                 objectRows.push({ui: node, entry: entry});
@@ -864,23 +884,10 @@
                     var toggle = node.add("item", "☐ 配下を全選択 / 全解除");
                     toggle._entry = {descendantToggle: true, parentEntry: entry};
                     objectRows.push({ui: toggle, entry: toggle._entry});
-                    node.expanded = true;
-                    addLayerTargetRow(entry, node);
                     addObjectNodes(entry.children, node);
-                    node.expanded = false;
-                } else if (entry.itemType === "Layer") {
-                    addLayerTargetRow(entry, node);
                     node.expanded = false;
                 }
             }
-        }
-
-        function addLayerTargetRow(entry, node) {
-            if (entry.itemType !== "Layer") return;
-            var target = node.add("item", "☐ このレイヤーを対象にする");
-            target._entry = {layerTarget: true, parentEntry: entry};
-            objectRows.push({ui: target, entry: target._entry});
-            node.expanded = true;
         }
 
         function paintObjectList() {
@@ -895,9 +902,7 @@
         function refreshVisibleObjectRows() {
             for (var i = 0; i < objectRows.length; i++) {
                 var row = objectRows[i], entry = row.entry;
-                if (entry.layerTarget) {
-                    row.ui.text = (picked[entry.parentEntry.id] ? "☑ " : "☐ ") + "このレイヤーを対象にする";
-                } else if (entry.descendantToggle) {
+                if (entry.descendantToggle) {
                     var state = descendantSelectionState(entry.parentEntry);
                     row.ui.text = (state === 2 ? "☑ " : (state === 1 ? "◩ " : "☐ ")) + "配下を全選択 / 全解除";
                 } else {
@@ -931,6 +936,7 @@
             selectAllButton.enabled = clearButton.enabled = value;
             runButton.enabled = false;
             cancelLoadButton.enabled = !value;
+            layerTargetButton.enabled = value && activeLayerEntry !== null;
         }
 
         function scanJob(ref, depth, out) {
@@ -1050,7 +1056,7 @@
 
         function drawOne(job) {
             var entry = job.entry;
-            var node = job.objectParent.add(entry.children.length || entry.itemType === "Layer" ? "node" : "item", objectRowText(entry));
+            var node = job.objectParent.add(entry.children.length ? "node" : "item", objectRowText(entry));
             // Expand only after a real child exists; an empty node may ignore it.
             if (job.objectParent !== objectList) job.objectParent.expanded = true;
             node._entry = entry; entry.ui = node;
@@ -1061,10 +1067,7 @@
                 node.expanded = true;
                 toggle._entry = {descendantToggle: true, parentEntry: entry};
                 objectRows.push({ui: toggle, entry: toggle._entry});
-            } else if (entry.itemType === "Layer") {
-                nodesToCollapse.push(node);
             }
-            addLayerTargetRow(entry, node);
             var destParent = job.destParent;
             if (isDestination(entry.ref)) {
                 var hasDest = false;
@@ -1140,6 +1143,8 @@
         function rebuildTrees() {
             $.global.__greenOverlayDiagnostic = {schema: "overlay-counts-v1", state: "loading", counts: {}};
             destinationRefs = []; objectEntries = []; objectRoots = []; objectRows = []; picked = {};
+            activeLayerEntry = null;
+            updateLayerTargetButton();
             destinationTree.removeAll(); objectList.removeAll();
             nodesToCollapse = [];
             loading = true; enableLists(false);
@@ -1169,6 +1174,37 @@
             }
         };
 
+        function updateLayerTargetButton() {
+            layerTargetButton.enabled = !loading && activeLayerEntry !== null;
+            layerTargetButton.text = activeLayerEntry && picked[activeLayerEntry.id]
+                ? "レイヤー対象を解除" : "レイヤー全体を対象にする";
+        }
+
+        layerTargetButton.onClick = function () {
+            if (loading || !activeLayerEntry) return;
+            var entry = activeLayerEntry;
+            try {
+                var turnOn = !picked[entry.id];
+                if (turnOn) {
+                    entry.targetBounds = withDocumentCoordinates(function () {
+                        return layerArtworkBounds(entry, true);
+                    });
+                    if (!entry.targetBounds) {
+                        alert("表示中のオブジェクトがないため、このレイヤーは対象にできません。");
+                        return;
+                    }
+                }
+                picked[entry.id] = turnOn;
+                refreshVisibleObjectRows();
+                updateCountAndInfo(entry.ref);
+                if (turnOn) requestCanvasFollow(entry);
+                statusText.text = turnOn
+                    ? (entry.visibilityUnknown ? "レイヤーを対象にしました（表示状態が不明な項目を含む）。" : "レイヤーを対象にしました。")
+                    : "レイヤー対象を解除しました。";
+            } catch (e) { showError(e); }
+            finally { updateLayerTargetButton(); }
+        };
+
         function handleObjectListEvent() {
             try {
                 var row, entry, i;
@@ -1188,31 +1224,13 @@
                     return;
                 }
 
-                if (entry.layerTarget) {
-                    var layerEntry = entry.parentEntry;
-                    var selectLayer = !picked[layerEntry.id];
-                    if (selectLayer) {
-                        layerEntry.targetBounds = withDocumentCoordinates(function () {
-                            return layerArtworkBounds(layerEntry, true);
-                        });
-                        if (!layerEntry.targetBounds) {
-                            alert("表示中のオブジェクトがないため、このレイヤーは対象にできません。");
-                            suppressObjectEvent++;
-                            try { objectList.selection = null; } catch (_) {}
-                            suppressObjectEvent--;
-                            inObjectListHandler = false;
-                            return;
-                        }
-                    }
-                    picked[layerEntry.id] = selectLayer;
-                    refreshVisibleObjectRows();
-                    updateCountAndInfo(layerEntry.ref);
-                    if (selectLayer) requestCanvasFollow(layerEntry);
-                    suppressObjectEvent++;
-                    try { objectList.selection = null; } catch (_) {}
-                    suppressObjectEvent--;
-                    inObjectListHandler = false;
-                    return;
+                // A layer row still belongs to native disclosure. The separate
+                // toolbar button chooses the layer without changing this tree.
+                activeLayerEntry = entry.itemType === "Layer" ? entry : null;
+                updateLayerTargetButton();
+                if (activeLayerEntry) {
+                    infoText.text = "レイヤー: " + entry.label +
+                        "\n「レイヤー全体を対象にする」で範囲全体を選択できます。";
                 }
 
                 if (entry.descendantToggle) {
@@ -1287,6 +1305,7 @@
             try {
                 picked = {};
                 refreshVisibleObjectRows();
+                updateLayerTargetButton();
                 try { doc.selection = null; } catch (_) {}
                 updateCountAndInfo(null);
                 statusText.text = "すべて解除しました。";
