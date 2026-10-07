@@ -184,7 +184,17 @@
         function boundsOf(item) {
             return withDocumentCoordinates(function () {
                 var b;
-                try { b = item.visibleBounds; } catch (_) { b = item.geometricBounds; }
+                if (typeOf(item) === "Layer") {
+                    for (var i = 0; i < objectEntries.length; i++) {
+                        if (sameItem(objectEntries[i].ref, item)) {
+                            b = objectEntries[i].targetBounds;
+                            break;
+                        }
+                    }
+                    if (!b) throw new Error("表示中のオブジェクトの範囲がありません。");
+                } else {
+                    try { b = item.visibleBounds; } catch (_) { b = item.geometricBounds; }
+                }
                 return {
                     left: b[0],
                     top: b[1],
@@ -194,6 +204,85 @@
                     height: Math.abs(b[1] - b[3])
                 };
             });
+        }
+
+        // Layers have no bounds of their own. The UI uses its loaded model;
+        // execution refreshes the same calculation from the live DOM before
+        // any overlay is created. Never select, group, or move the source art.
+        function layerArtworkBounds(root, useModel) {
+            function refOf(node) { return useModel ? node.ref : node; }
+            function childrenOf(node) { return useModel ? node.children : directChildren(node); }
+            function hidden(ref) {
+                try {
+                    return typeOf(ref) === "Layer" ? ref.visible === false : ref.hidden === true;
+                } catch (_) { throw new Error("表示状態を取得できません。"); }
+            }
+            function normalized(b) {
+                if (!b || b.length !== 4) return null;
+                for (var i = 0; i < 4; i++) {
+                    if (typeof b[i] !== "number" || !isFinite(b[i])) return null;
+                }
+                return [Math.min(b[0], b[2]), Math.max(b[1], b[3]),
+                    Math.max(b[0], b[2]), Math.min(b[1], b[3])];
+            }
+            function rectOf(ref, mask) {
+                var b;
+                try { b = normalized(mask ? ref.geometricBounds : ref.visibleBounds); } catch (_) {}
+                if (!b) {
+                    try { b = normalized(mask ? ref.visibleBounds : ref.geometricBounds); } catch (_) {}
+                }
+                if (!b) throw new Error("オブジェクトの範囲を取得できません。");
+                return b;
+            }
+            function union(a, b) {
+                if (!a) return b;
+                if (!b) return a;
+                return [Math.min(a[0], b[0]), Math.max(a[1], b[1]),
+                    Math.max(a[2], b[2]), Math.min(a[3], b[3])];
+            }
+            function clipping(node) {
+                var ref = refOf(node), t = typeOf(ref);
+                if (t === "PathItem") {
+                    try { return ref.clipping === true; } catch (_) { return false; }
+                }
+                if (t === "CompoundPathItem") {
+                    var paths = childrenOf(node);
+                    for (var i = 0; i < paths.length; i++) {
+                        try { if (refOf(paths[i]).clipping) return true; } catch (_) {}
+                    }
+                }
+                return false;
+            }
+            function walk(node) {
+                var ref = refOf(node), t = typeOf(ref);
+                if (hidden(ref)) return null;
+                if (t === "Layer" || t === "GroupItem") {
+                    var kids = childrenOf(node), result = null, clip = null, clipped = false;
+                    try { clipped = t === "GroupItem" && ref.clipped; } catch (_) {}
+                    for (var i = 0; i < kids.length; i++) {
+                        if (clipped && clipping(kids[i])) {
+                            clip = rectOf(refOf(kids[i]), true);
+                        } else {
+                            result = union(result, walk(kids[i]));
+                        }
+                    }
+                    if (clipped && result) {
+                        if (!clip) throw new Error("クリッピング範囲を取得できません。");
+                        result = [Math.max(result[0], clip[0]), Math.min(result[1], clip[1]),
+                            Math.min(result[2], clip[2]), Math.max(result[3], clip[3])];
+                        if (result[0] > result[2] || result[3] > result[1]) return null;
+                    }
+                    return result;
+                }
+                try { if (t === "PathItem" && ref.guides) return null; } catch (_) {}
+                return rectOf(ref, false);
+            }
+            var ancestor = refOf(root);
+            while (ancestor && typeOf(ancestor) !== "Document") {
+                if (hidden(ancestor)) return null;
+                ancestor = parentOf(ancestor);
+            }
+            return walk(root);
         }
 
         function indentText(depth) {
@@ -766,7 +855,8 @@
         function addObjectNodes(entries, parent) {
             for (var i = 0; i < entries.length; i++) {
                 var entry = entries[i];
-                var node = parent.add(entry.children.length ? "node" : "item", objectRowText(entry));
+                var node = parent.add(entry.children.length || entry.itemType === "Layer" ? "node" : "item", objectRowText(entry));
+                if (parent !== objectList) parent.expanded = true;
                 node._entry = entry;
                 entry.ui = node;
                 objectRows.push({ui: node, entry: entry});
@@ -774,10 +864,23 @@
                     var toggle = node.add("item", "☐ 配下を全選択 / 全解除");
                     toggle._entry = {descendantToggle: true, parentEntry: entry};
                     objectRows.push({ui: toggle, entry: toggle._entry});
+                    node.expanded = true;
+                    addLayerTargetRow(entry, node);
                     addObjectNodes(entry.children, node);
+                    node.expanded = false;
+                } else if (entry.itemType === "Layer") {
+                    addLayerTargetRow(entry, node);
                     node.expanded = false;
                 }
             }
+        }
+
+        function addLayerTargetRow(entry, node) {
+            if (entry.itemType !== "Layer") return;
+            var target = node.add("item", "☐ このレイヤーを対象にする");
+            target._entry = {layerTarget: true, parentEntry: entry};
+            objectRows.push({ui: target, entry: target._entry});
+            node.expanded = true;
         }
 
         function paintObjectList() {
@@ -792,7 +895,9 @@
         function refreshVisibleObjectRows() {
             for (var i = 0; i < objectRows.length; i++) {
                 var row = objectRows[i], entry = row.entry;
-                if (entry.descendantToggle) {
+                if (entry.layerTarget) {
+                    row.ui.text = (picked[entry.parentEntry.id] ? "☑ " : "☐ ") + "このレイヤーを対象にする";
+                } else if (entry.descendantToggle) {
                     var state = descendantSelectionState(entry.parentEntry);
                     row.ui.text = (state === 2 ? "☑ " : (state === 1 ? "◩ " : "☐ ")) + "配下を全選択 / 全解除";
                 } else {
@@ -945,7 +1050,7 @@
 
         function drawOne(job) {
             var entry = job.entry;
-            var node = job.objectParent.add(entry.children.length ? "node" : "item", objectRowText(entry));
+            var node = job.objectParent.add(entry.children.length || entry.itemType === "Layer" ? "node" : "item", objectRowText(entry));
             // Expand only after a real child exists; an empty node may ignore it.
             if (job.objectParent !== objectList) job.objectParent.expanded = true;
             node._entry = entry; entry.ui = node;
@@ -956,7 +1061,10 @@
                 node.expanded = true;
                 toggle._entry = {descendantToggle: true, parentEntry: entry};
                 objectRows.push({ui: toggle, entry: toggle._entry});
+            } else if (entry.itemType === "Layer") {
+                nodesToCollapse.push(node);
             }
+            addLayerTargetRow(entry, node);
             var destParent = job.destParent;
             if (isDestination(entry.ref)) {
                 var hasDest = false;
@@ -1080,6 +1188,32 @@
                     return;
                 }
 
+                if (entry.layerTarget) {
+                    var layerEntry = entry.parentEntry;
+                    var selectLayer = !picked[layerEntry.id];
+                    if (selectLayer) {
+                        layerEntry.targetBounds = withDocumentCoordinates(function () {
+                            return layerArtworkBounds(layerEntry, true);
+                        });
+                        if (!layerEntry.targetBounds) {
+                            alert("表示中のオブジェクトがないため、このレイヤーは対象にできません。");
+                            suppressObjectEvent++;
+                            try { objectList.selection = null; } catch (_) {}
+                            suppressObjectEvent--;
+                            inObjectListHandler = false;
+                            return;
+                        }
+                    }
+                    picked[layerEntry.id] = selectLayer;
+                    refreshVisibleObjectRows();
+                    updateCountAndInfo(layerEntry.ref);
+                    if (selectLayer) requestCanvasFollow(layerEntry);
+                    suppressObjectEvent++;
+                    try { objectList.selection = null; } catch (_) {}
+                    suppressObjectEvent--;
+                    inObjectListHandler = false;
+                    return;
+                }
 
                 if (entry.descendantToggle) {
                     var parentEntry = entry.parentEntry;
@@ -1185,7 +1319,20 @@
             var i, entry;
             for (i = 0; i < objectEntries.length; i++) {
                 entry = objectEntries[i];
-                if (!entry.selectable || !picked[entry.id]) continue;
+                if (!picked[entry.id]) continue;
+                if (entry.itemType === "Layer") {
+                    // Snapshot every layer before creating any overlays. Inserting
+                    // an overlay into a source layer must not enlarge later targets.
+                    var b = withDocumentCoordinates(function () {
+                        return layerArtworkBounds(entry.ref, false);
+                    });
+                    entry.targetBounds = b;
+                    keys.push("{t:\"Layer\",b:" + (b ? "[" +
+                        jsNumber(b[0]) + "," + jsNumber(b[1]) + "," +
+                        jsNumber(b[2]) + "," + jsNumber(b[3]) + "]" : "null") + "}");
+                    continue;
+                }
+                if (!entry.selectable) continue;
                 if (entry.zOrder === null || entry.zOrder === undefined) continue;
                 keys.push(
                     "{z:" + jsNumber(entry.zOrder) +
@@ -1250,8 +1397,9 @@
                 "}" +
                 "function keyOf(z,t){return t+'#'+z;}" +
                 "function collectSources(keys){" +
-                "var wanted={},found={},result=[],i,item,k;" +
-                "for(i=0;i<keys.length;i++)wanted[keyOf(keys[i].z,keys[i].t)]=true;" +
+                "var wanted={},found={},result=[],i,item,k,hasArt=false;" +
+                "for(i=0;i<keys.length;i++){if(keys[i].t!='Layer'){wanted[keyOf(keys[i].z,keys[i].t)]=true;hasArt=true;}}" +
+                "if(!hasArt){for(i=0;i<keys.length;i++)result.push(null);return result;}" +
                 "try{" +
                 "for(i=0;i<doc.pageItems.length;i++){" +
                 "item=doc.pageItems[i];" +
@@ -1284,10 +1432,16 @@
                 "var i,src,b,w,h,top,left,rect;" +
                 "for(i=0;i<sources.length;i++){" +
                 "try{" +
+                "src=null;" +
+                "if(keys[i].t=='Layer'){" +
+                "b=keys[i].b;" +
+                "if(!b){failed++;lastError='レイヤーに表示中の範囲がありません';logEvent('execute.layerBounds',lastError);continue;}" +
+                "}else{" +
                 "src=sources[i];" +
                 "if(!src&&fallbackIndex<selectionFallback.length){src=selectionFallback[fallbackIndex++];}" +
                 "if(!src){failed++;lastError='対象が見つかりません';logEvent('execute.source',lastError);continue;}" +
                 "try{b=src.visibleBounds;}catch(e8){b=src.geometricBounds;}" +
+                "}" +
                 "w=Math.abs(b[2]-b[0]);h=Math.abs(b[1]-b[3]);" +
                 "if(w<=0||h<=0){failed++;logEvent('execute.bounds','Non-positive bounds',src);continue;}" +
                 "top=b[1]>b[3]?b[1]:b[3];left=b[0]<b[2]?b[0]:b[2];" +
