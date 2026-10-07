@@ -1,0 +1,186 @@
+﻿// Green Overlay: ui (included by green-overlay.jsx)
+        var w = new Window(
+            "palette",
+            "グリーンオーバーレイ",
+            undefined,
+            { resizeable: true }
+        );
+        $.global.__greenOverlayWindow = w;
+
+        w.orientation = "column";
+        w.alignChildren = ["fill", "top"];
+        w.spacing = 8;
+        w.margins = 10;
+
+        var intro = w.add(
+            "statictext",
+            undefined,
+            "対象を複数選択し、同じ位置・サイズに矩形を作成します。"
+        );
+        intro.characters = 58;
+
+        var appearancePanel = w.add("panel", undefined, "オーバーレイ設定");
+        appearancePanel.orientation = "row";
+        appearancePanel.alignChildren = ["left", "center"];
+        appearancePanel.margins = 8;
+
+        appearancePanel.add("statictext", undefined, "R");
+        var redInput = appearancePanel.add("edittext", undefined, "0");
+        redInput.characters = 4;
+        appearancePanel.add("statictext", undefined, "G");
+        var greenInput = appearancePanel.add("edittext", undefined, "255");
+        greenInput.characters = 4;
+        appearancePanel.add("statictext", undefined, "B");
+        var blueInput = appearancePanel.add("edittext", undefined, "0");
+        blueInput.characters = 4;
+        appearancePanel.add("statictext", undefined, "不透明度 %");
+        var opacityInput = appearancePanel.add("edittext", undefined, "100");
+        opacityInput.characters = 4;
+
+        var destinationPanel = w.add("panel", undefined, "作成先");
+        destinationPanel.orientation = "column";
+        destinationPanel.alignChildren = ["fill", "fill"];
+        destinationPanel.margins = 8;
+
+        var destinationTree = destinationPanel.add("treeview", undefined, []);
+        destinationTree.preferredSize = [480, 160];
+
+        var objectPanel = w.add("panel", undefined, "対象オブジェクト");
+        objectPanel.orientation = "column";
+        objectPanel.alignChildren = ["fill", "fill"];
+        objectPanel.margins = 8;
+
+        var toolbar = objectPanel.add("group");
+        toolbar.orientation = "row";
+
+        var selectAllButton = toolbar.add("button", undefined, "全選択");
+        var clearButton = toolbar.add("button", undefined, "全解除");
+        var countText = toolbar.add("statictext", undefined, "0件選択");
+        countText.characters = 16;
+
+
+        var layerToolbar = objectPanel.add("group");
+        layerToolbar.orientation = "row";
+        var layerTargetButton = layerToolbar.add("button", undefined, "レイヤー全体を対象にする");
+        layerTargetButton.enabled = false;
+
+        // Both lists use native TreeView disclosure buttons.
+        var objectList = objectPanel.add("treeview", undefined, []);
+        objectList.preferredSize = [480, 330];
+
+        var infoPanel = w.add("panel", undefined, "選択情報");
+        infoPanel.orientation = "column";
+        infoPanel.alignChildren = ["fill", "top"];
+        infoPanel.margins = 8;
+
+        var infoText = infoPanel.add(
+            "statictext",
+            undefined,
+            "オブジェクトを選択してください。",
+            { multiline: true }
+        );
+        infoText.preferredSize = [480, 56];
+
+        var bottom = w.add("group");
+        bottom.orientation = "row";
+        bottom.alignment = ["fill", "bottom"];
+
+        var statusText = bottom.add("statictext", undefined, "準備完了");
+        statusText.alignment = ["fill", "center"];
+
+        var cancelLoadButton = bottom.add("button", undefined, "読み込みを中止");
+        var runButton = bottom.add("button", undefined, "確認 / 実行");
+        runButton.enabled = false;
+
+        function clampNumber(value, minValue, maxValue) {
+            var n = Number(value);
+            if (isNaN(n)) return null;
+            if (n < minValue) n = minValue;
+            if (n > maxValue) n = maxValue;
+            return Math.round(n);
+        }
+
+        function overlaySettings() {
+            var r = clampNumber(redInput.text, 0, 255);
+            var g = clampNumber(greenInput.text, 0, 255);
+            var b = clampNumber(blueInput.text, 0, 255);
+            var opacity = clampNumber(opacityInput.text, 0, 100);
+            if (r === null || g === null || b === null || opacity === null) return null;
+            redInput.text = String(r);
+            greenInput.text = String(g);
+            blueInput.text = String(b);
+            opacityInput.text = String(opacity);
+            return { r: r, g: g, b: b, opacity: opacity };
+        }
+
+        function selectedCount() {
+            var count = 0;
+            var i;
+            for (i = 0; i < objectEntries.length; i++) {
+                if (picked[objectEntries[i].id]) count++;
+            }
+            return count;
+        }
+
+        function updateRunState() {
+            runButton.enabled =
+                selectedCount() > 0 &&
+                destinationTree.selection !== null;
+        }
+
+        function labelOfItem(item) {
+            var i, entry;
+            for (i = 0; i < objectEntries.length; i++) {
+                entry = objectEntries[i];
+                if (entry.ref === item || sameItem(entry.ref, item)) return entry.label;
+            }
+            return displayName(item, kindLabel(item));
+        }
+
+        function updateCountAndInfo(clickedItem) {
+            var count = selectedCount();
+            countText.text = count + "件選択";
+
+            if (clickedItem) {
+                var pendingLayer = null;
+                for (var i = 0; i < objectEntries.length; i++) {
+                    if (objectEntries[i].ref === clickedItem && objectEntries[i].itemType === "Layer") {
+                        pendingLayer = objectEntries[i]; break;
+                    }
+                }
+                if (pendingLayer && !pendingLayer.targetBounds) {
+                    infoText.text = "名前: " + pendingLayer.label +
+                        "\n種類: レイヤー / サイズ: 取得待ち / 選択中: " + count + "件";
+                    updateRunState();
+                    return;
+                }
+                try {
+                    var b = boundsOf(clickedItem);
+                    infoText.text =
+                        "名前: " + labelOfItem(clickedItem) +
+                        "\n種類: " + kindLabel(clickedItem) +
+                        " / サイズ: " +
+                        b.width.toFixed(2) + " × " +
+                        b.height.toFixed(2) + " pt" +
+                        " / 選択中: " + count + "件";
+                } catch (e) {
+                    logEvent("bounds.info", e, clickedItem);
+                    infoText.text = count + "件のオブジェクトを選択中";
+                }
+            } else {
+                infoText.text =
+                    count > 0
+                        ? count + "件のオブジェクトを選択中"
+                        : "オブジェクトを選択してください。";
+            }
+
+            updateRunState();
+        }
+
+        function applyIllustratorSelection(entry) {
+            if (!entry || !entry.selectable) return;
+            try {
+                entry.ref.selected = !!picked[entry.id];
+            } catch (e) { logEvent("selection.item", e, entry.ref); }
+        }
+

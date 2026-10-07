@@ -5,7 +5,7 @@ const raw = fs.readFileSync(__dirname + '/../green-overlay.jsx');
 assert.equal(raw[0], 0xEF);
 assert.equal(raw[1], 0xBB);
 assert.equal(raw[2], 0xBF, 'JSX must stay UTF-8 with BOM so Illustrator can read it');
-const source = raw.toString('utf8').replace(/^\uFEFF/, '').replace(/^#target.*$/gm, '');
+const source = require('./load-script.cjs').loadScript(__dirname + '/../green-overlay.jsx');
 let reads = 0, boundsReads = 0, z = 0, shown = false, readsAtShow = null, windowLayouts = 0;
 function container(type, children) {
     const item = {typename:type, name:type, absoluteZOrderPosition:++z, layers:[], pathItems:{rectangle(){throw Error('locked destination');}}};
@@ -20,7 +20,7 @@ const group=container('GroupItem',[nested]);
 const layer=container('Layer',[group]);
 const doc={typename:'Document',layers:[layer],views:[{zoom:1}],pageItems:leaves,pathItems:leaves,activeLayer:layer,selection:[]};
 doc.pathItems.rectangle = () => { throw Error('locked destination'); };
-const controls=[], logs=[], alerts=[], bodies=[], pending=[];
+const controls=[], logs=[], alerts=[], bodies=[], pending=[], messages=[];
 function control(type,text) {
     const c={type,text,items:[],selection:null,layout:{resize(){},layout(){}},
         add(type,a,b){if(this.expanded===false) this.addedWhileCollapsed=true; const child=control(type,b===undefined?a:b);child.index=this.items.length;this.items.push(child);return child;},
@@ -37,7 +37,7 @@ const context={app:{documents:[doc],activeDocument:doc,coordinateSystem:0,redraw
     },
     RGBColor:function(){}, ElementPlacement:{PLACEATBEGINNING:1},ZOrderMethod:{BRINGTOFRONT:1},
     alert:s=>alerts.push(s),confirm:()=>true,
-    BridgeTalk:function(){this.send=()=>{bodies.push(this.body); if(this.body==="'ok';") pending.push(this); return true;};}};
+    BridgeTalk:function(){this.send=()=>{bodies.push(this.body);messages.push(this); if(this.body==="'ok';") pending.push(this); return true;};}};
 vm.runInNewContext(source,context);
 assert(shown,'window must show before work');
 assert.equal(readsAtShow,0,'window shows before page item scans');
@@ -229,10 +229,15 @@ assert(controls.some(c=>c.text==='1件選択'));
 assert.deepEqual(leaves.map(item=>item.selected),selectionBeforeLayer,'layer button does not change individual artwork selection');
 assert.equal(reads,readsBeforeLayer,'layer click reads bounds from the loaded model, not collections');
 assert.equal(layerNode.expanded,true,'layer target selection preserves native disclosure');
-assert(bodies.at(-1).includes('var p=[5,5]'),'layer click follows the union center');
+const previewMessage=messages.at(-1);
+assert(previewMessage.onResult,'layer center is requested asynchronously');
+const previewBounds=vm.runInNewContext(previewMessage.body,context);
+previewMessage.onResult({body:previewBounds});
+assert.deepEqual(Array.from(doc.views[0].centerPoint),[5,5],'layer preview follows union center using fresh host refs');
+const readsAfterPreview=reads;
 firstLayerButton.onClick();
 assert(!layerNode.text.includes('（対象）'),'same layer button toggles off');
-assert.equal(reads,readsBeforeLayer);
+assert.equal(reads,readsAfterPreview,'deselection does not rescan geometry');
 assert.equal(layerNode.items.length,2,'layer children keep their pre-feature structure: subtree toggle plus group');
 console.log('Passed: external layer button, unchanged tree children/disclosure and cached bounds');
 
@@ -244,7 +249,8 @@ function runLayerTool(document) {
     const layerButton=own.find(c=>c.text==='レイヤー全体を対象にする');
     return {ctx,own,layerButton,destination:ownTrees[0],targets:ownTrees[1],
         click(row){ownTrees[1].selection=row;ownTrees[1].onChange();},
-        pickLayer(node){ownTrees[1].selection=node;ownTrees[1].onChange();assert(layerButton.enabled);layerButton.onClick();}};
+        pickLayer(node){ownTrees[1].selection=node;ownTrees[1].onChange();assert(layerButton.enabled);layerButton.onClick();},
+        previewLayer(){const msg=messages.at(-1);const result=vm.runInNewContext(msg.body,ctx);if(msg.onResult)msg.onResult({body:result});return result;}};
 }
 function rowFor(node, ref) { return node.items.find(row=>row._entry && row._entry.ref===ref); }
 function layerPicked(node) { return node.text.includes('（対象）'); }
@@ -275,6 +281,7 @@ rootLayer.parent=layerDoc;
 const layerTool=runLayerTool(layerDoc);
 const rootUI=layerTool.targets.items[0], subUI=rowFor(rootUI,sublayer);
 layerTool.pickLayer(rootUI);
+layerTool.previewLayer();
 assert(layerTool.own.some(c=>typeof c.text==='string' && c.text.includes('110.00 × 80.00 pt')),'layer combines visible descendants and stroke bounds');
 layerTool.pickLayer(subUI);
 layerTool.click(rowFor(rootUI,mainPath));
@@ -288,8 +295,8 @@ layerTool.destination.selection=layerTool.destination.items[0];layerTool.destina
 layerTool.own.find(c=>c.text==='確認 / 実行').onClick();
 const layerExecute=bodies.at(-1);
 new vm.Script(layerExecute);
-assert(layerExecute.includes('t:"Layer",b:[0,100,160,0]'),'live source union excludes hidden art and clips oversized originals');
-assert(layerExecute.includes('t:"Layer",b:[100,90,130,70]'),'sublayer resolved by its own reference even with identical names');
+assert(layerExecute.includes('t:"Layer",p:[0],n:"same-name"'),'layer source is resolved by the cached address');
+assert(layerExecute.includes('t:"Layer",p:[0,0],n:"same-name"'),'same-name sublayers have distinct source addresses');
 vm.runInNewContext(layerExecute,layerTool.ctx);
 assert.equal(created.length,3,'one rectangle for each selected layer and each selected ordinary object');
 assert.deepEqual(created.map(r=>r.args),[[100,0,160,100],[90,100,30,20],[40,10,20,30]],'every layer snapshot precedes creation into the source layer');
@@ -321,12 +328,15 @@ const emptyTool=runLayerTool(emptyDoc);
 for(const ref of [emptyLayer,hiddenOnlyLayer,childOfHidden]) {
     const all=[];function visit(n){all.push(n);n.items.forEach(visit);}visit(emptyTool.targets);
     const node=all.find(n=>n._entry && n._entry.ref===ref);
+    const before=alerts.length;
     emptyTool.pickLayer(node);
-    assert(!layerPicked(node));
+    assert(layerPicked(node),'layer selection does not read native visibility/bounds');
+    assert.equal(alerts.length,before,'empty/hidden layers do not cause selection-time errors');
+    assert.equal(emptyTool.previewLayer(),'','empty/hidden layer preview does not pan');
+    emptyTool.pickLayer(node);
 }
 assert(emptyTool.own.some(c=>c.text==='0件選択'));
-assert(alerts.slice(-3).every(s=>s.includes('表示中のオブジェクトがない')));
-console.log('Passed: empty layers, hidden-only layers and hidden ancestors cannot become layer targets');
+console.log('Passed: empty and hidden layer selection is nonblocking; preview handles absent bounds');
 
 // A layer that becomes empty between selection and execution must never use
 // another selected artwork as the old host's selection fallback.
@@ -339,7 +349,7 @@ disappearing.hidden=true;
 vanishTool.destination.selection=vanishTool.destination.items[0];vanishTool.destination.onChange();
 vanishTool.own.find(c=>c.text==='確認 / 実行').onClick();
 const emptyExecute=bodies.at(-1);
-assert(emptyExecute.includes('t:"Layer",b:null'));
+assert(emptyExecute.includes('t:"Layer",p:[0]'));
 const misleading=bounded('unrelated',[0,50,50,0]);
 vanishingDoc.selection=[misleading];
 let accidentalCreates=0;
@@ -365,21 +375,28 @@ const maskLayer=withKids(art('Layer','compound-layer',{layers:[]}),[compoundMask
 const maskDoc={...layerDoc,layers:[maskLayer],pageItems:[],pathItems:[],activeLayer:maskLayer};
 const maskTool=runLayerTool(maskDoc);
 maskTool.pickLayer(maskTool.targets.items[0]);
+maskTool.previewLayer();
 assert(maskTool.own.some(c=>typeof c.text==='string' && c.text.includes('30.00 × 35.00 pt')));
 maskTool.destination.selection=maskTool.destination.items[0];maskTool.destination.onChange();
 maskTool.own.find(c=>c.text==='確認 / 実行').onClick();
-assert(bodies.at(-1).includes('t:"Layer",b:[-10,30,20,-5]'));
+assert(bodies.at(-1).includes('t:"Layer",p:[0],n:"compound-layer"'));
 const brokenBounds=bounded('unreadable',[0,10,10,0]);
 Object.defineProperty(brokenBounds,'visibleBounds',{get(){throw Error('bounds unavailable');}});
 Object.defineProperty(brokenBounds,'geometricBounds',{get(){throw Error('bounds unavailable');}});
 const brokenBoundsLayer=withKids(art('Layer','bounds-failure',{layers:[]}),[brokenBounds]);
 const brokenBoundsDoc={...layerDoc,layers:[brokenBoundsLayer],pageItems:[],pathItems:[],activeLayer:brokenBoundsLayer};
 const boundsFailureTool=runLayerTool(brokenBoundsDoc);
+const beforeBrokenSelection=alerts.length;
 boundsFailureTool.pickLayer(boundsFailureTool.targets.items[0]);
-assert(!layerPicked(boundsFailureTool.targets.items[0]));
-assert(boundsFailureTool.own.some(c=>c.text==='0件選択'));
-assert(alerts.at(-1).includes('オブジェクトの範囲を取得できません'));
-console.log('Passed: compound clipping, stroke-inclusive layer bounds and unreadable bounds reject partial targets');
+assert(layerPicked(boundsFailureTool.targets.items[0]));
+assert.equal(alerts.length,beforeBrokenSelection,'broken geometry cannot abort layer selection');
+assert.equal(boundsFailureTool.previewLayer(),'');
+boundsFailureTool.destination.selection=boundsFailureTool.destination.items[0];boundsFailureTool.destination.onChange();
+boundsFailureTool.own.find(c=>c.text==='確認 / 実行').onClick();
+vm.runInNewContext(bodies.at(-1),boundsFailureTool.ctx);
+assert(alerts.at(-1).includes('1件は作成できませんでした'));
+assert(alerts.at(-1).includes('範囲を取得できない項目が 1 件'));
+console.log('Passed: unreadable layer geometry is reported per execution target, without breaking selection');
 
 // Some Illustrator wrappers throw when visibility is queried even while their
 // geometry is readable. Keep their bounds and the complete native child tree.
@@ -402,14 +419,124 @@ assert(layerPicked(uncertainRoot));
 assert.equal(alerts.length,alertsBeforeUnknown,'visibility read failure does not abort the layer target');
 assert.deepEqual(uncertainRoot.items,childRowsBefore,'layer selection never adds/removes/reorders child rows');
 assert.deepEqual(uncertainGroupRow.items,groupRowsBefore);
-assert(uncertainTool.own.some(c=>c.text==='レイヤーを対象にしました（表示状態が不明な項目を含む）。'));
+uncertainTool.previewLayer();
+assert(uncertainTool.own.some(c=>c.text==='レイヤー範囲を取得しました（不確かな表示状態または代替範囲を含む）。'));
 assert(uncertainTool.own.some(c=>typeof c.text==='string' && c.text.includes('30.00 × 20.00 pt')));
 uncertainTool.destination.selection=uncertainTool.destination.items[0];uncertainTool.destination.onChange();
 uncertainTool.own.find(c=>c.text==='確認 / 実行').onClick();
-assert(bodies.at(-1).includes('t:"Layer",b:[0,20,30,0]'),'live calculation also tolerates unavailable visibility, and still excludes confirmed-hidden artwork');
+assert(bodies.at(-1).includes('t:"Layer",p:[0],n:"unknown layer"'));
 uncertainTool.pickLayer(uncertainRoot);
 assert(!layerPicked(uncertainRoot));
 uncertainTool.click(uncertainGroupRow);
 assert(!uncertainTool.layerButton.enabled,'group row cannot operate the previous layer target');
 assert(logs.some(line=>line.includes('bounds.visibility')&&line.includes('Unknown visibility included')));
 console.log('Passed: throwing visibility accessors preserve bounds, child rows, retry and confirmed-hidden exclusion');
+
+// Cached Illustrator wrappers may stop exposing geometry after startup. Layer
+// selection must remain usable, and execution must use fresh native handles.
+const stalePath=bounded('cached-path',[0,10,10,0]);
+const staleLayer=withKids(art('Layer','fresh-handles',{layers:[]}),[stalePath]);
+const staleDoc={...layerDoc,layers:[staleLayer],pageItems:[stalePath],pathItems:[],activeLayer:staleLayer};
+const staleTool=runLayerTool(staleDoc);
+const staleUI=staleTool.targets.items[0];
+let staleBoundsReads=0;
+for (const prop of ['visibleBounds','geometricBounds']) Object.defineProperty(stalePath,prop,{get(){staleBoundsReads++;throw Error('stale artwork handle');}});
+const freshPath=bounded('fresh-path',[20,60,80,10]);
+const freshLayer=withKids(art('Layer','fresh-handles',{layers:[]}),[freshPath]);
+const freshCreated=[];
+freshLayer.pathItems={rectangle(top,left,width,height){const r={args:[top,left,width,height],zOrder(){}};freshCreated.push(r);return r;}};
+const freshDoc={...staleDoc,layers:[freshLayer],pageItems:[freshPath],pathItems:[],activeLayer:freshLayer,views:[{zoom:1}]};
+staleTool.ctx.app.activeDocument=freshDoc;staleTool.ctx.app.documents=[freshDoc];
+const staleAlertsBefore=alerts.length;
+staleTool.pickLayer(staleUI);
+assert.equal(staleBoundsReads,0,'selection must never read cached artwork geometry');
+assert.equal(alerts.length,staleAlertsBefore);
+staleTool.previewLayer();
+assert.deepEqual(Array.from(freshDoc.views[0].centerPoint),[50,35]);
+assert.equal(staleBoundsReads,0,'preview resolves live layer and artwork handles');
+staleTool.destination.selection=staleTool.destination.items[0];staleTool.destination.onChange();
+staleTool.own.find(c=>c.text==='確認 / 実行').onClick();
+const freshExecute=bodies.at(-1);
+assert.equal(staleBoundsReads,0,'building execution only serializes cached layer addresses');
+vm.runInNewContext(freshExecute,staleTool.ctx);
+assert.deepEqual(freshCreated.map(r=>r.args),[[60,20,60,50]]);
+assert.equal(staleBoundsReads,0);
+console.log('Passed: stale UI geometry cannot fail layer selection, preview or fresh host execution');
+
+// If child bounds are unavailable but a group has valid bounds, use its native
+// container bounds with an explicit approximation notice.
+const opaqueChild=bounded('opaque-child',[0,10,10,0]);
+for(const prop of ['visibleBounds','geometricBounds'])Object.defineProperty(opaqueChild,prop,{get(){throw Error('child bounds unavailable');}});
+const readableGroup=withKids(art('GroupItem','readable-group',{visibleBounds:[-10,40,50,-5],geometricBounds:[-10,40,50,-5]}),[opaqueChild]);
+const fallbackLayer=withKids(art('Layer','fallback-layer',{layers:[]}),[readableGroup]);
+const fallbackCreated=[];
+fallbackLayer.pathItems={rectangle(top,left,width,height){const r={args:[top,left,width,height],zOrder(){}};fallbackCreated.push(r);return r;}};
+const fallbackDoc={...layerDoc,layers:[fallbackLayer],pageItems:[],pathItems:[],activeLayer:fallbackLayer};
+const fallbackTool=runLayerTool(fallbackDoc);
+fallbackTool.pickLayer(fallbackTool.targets.items[0]);
+fallbackTool.previewLayer();
+fallbackTool.destination.selection=fallbackTool.destination.items[0];fallbackTool.destination.onChange();
+fallbackTool.own.find(c=>c.text==='確認 / 実行').onClick();
+vm.runInNewContext(bodies.at(-1),fallbackTool.ctx);
+assert.deepEqual(fallbackCreated.map(r=>r.args),[[40,-10,60,45]]);
+assert(alerts.at(-1).includes('グループ範囲の代替'));
+assert(logs.some(line=>line.includes('bounds.fallback')));
+console.log('Passed: readable group bounds recover unreadable children with an approximation notice');
+
+// Failure of a layer must not prevent an ordinary selected target from running.
+const badLayerPath=bounded('bad-layer-path',[0,20,20,0]);
+for(const prop of ['visibleBounds','geometricBounds'])Object.defineProperty(badLayerPath,prop,{get(){throw Error('cannot read bounds');}});
+const badLayer=withKids(art('Layer','bad-layer',{layers:[]}),[badLayerPath]);
+const goodOrdinary=bounded('ordinary-good',[5,30,25,10]);
+const goodLayer=withKids(art('Layer','ordinary-layer',{layers:[]}),[goodOrdinary]);
+const mixedCreated=[];
+goodLayer.pathItems={rectangle(top,left,width,height){const r={args:[top,left,width,height],zOrder(){}};mixedCreated.push(r);return r;}};
+const mixedFailureDoc={...layerDoc,layers:[badLayer,goodLayer],pageItems:[badLayerPath,goodOrdinary],pathItems:[],activeLayer:goodLayer};
+const mixedFailureTool=runLayerTool(mixedFailureDoc);
+mixedFailureTool.pickLayer(rowFor(mixedFailureTool.targets,badLayer));
+const ordinaryUI=rowFor(rowFor(mixedFailureTool.targets,goodLayer),goodOrdinary);
+mixedFailureTool.click(ordinaryUI);
+const ordinaryDest=mixedFailureTool.destination.items.find(n=>n.text.includes('ordinary-layer'));
+mixedFailureTool.destination.selection=ordinaryDest;mixedFailureTool.destination.onChange();
+mixedFailureTool.own.find(c=>c.text==='確認 / 実行').onClick();
+vm.runInNewContext(bodies.at(-1),mixedFailureTool.ctx);
+assert.deepEqual(mixedCreated.map(r=>r.args),[[30,5,20,20]]);
+assert(alerts.at(-1).includes('1件を作成しました')&&alerts.at(-1).includes('1件は作成できませんでした'));
+console.log('Passed: unreadable layer targets cannot abort ordinary target creation');
+
+// Compound masks can derive their rectangle from component paths when the
+// host does not expose a compound-wide geometric/visible bound.
+for(const prop of ['visibleBounds','geometricBounds'])Object.defineProperty(compoundMask,prop,{get(){throw Error('compound-wide bounds unavailable');}});
+maskTool.pickLayer(maskTool.targets.items[0]);
+maskTool.pickLayer(maskTool.targets.items[0]);
+const reconstructedMask=maskTool.previewLayer();
+assert(reconstructedMask.startsWith('-10,30,20,-5;'));
+console.log('Passed: compound clipping bounds can be reconstructed from component paths');
+
+// Splitting the source must preserve relative include resolution when the user
+// extracts the repository to a folder whose name contains spaces/non-ASCII text.
+const os=require('node:os'), path=require('node:path');
+const packageRoot=fs.mkdtempSync(path.join(os.tmpdir(),'desk-tools-'));
+try {
+    const relocated=path.join(packageRoot,'script folder 日本語');
+    fs.cpSync(path.resolve(__dirname,'..'),relocated,{recursive:true});
+    const loaded=require('./load-script.cjs').loadScript(path.join(relocated,'green-overlay.jsx'));
+    assert.equal(loaded,source);
+    new vm.Script(loaded);
+    const missing=path.join(relocated,'green-overlay','bounds.jsxinc');
+    fs.rmSync(missing);
+    assert.throws(()=>require('./load-script.cjs').loadScript(path.join(relocated,'green-overlay.jsx')),/ENOENT/);
+}finally{fs.rmSync(packageRoot,{recursive:true,force:true});}
+assert(!execute.includes('function layerArtworkBounds'),'ordinary-only execution does not serialize layer-only helpers');
+console.log('Passed: modular package relocation, BOMs, missing dependency detection and unchanged ordinary-only host payload');
+
+// The old loader already recovers transient document wrappers. Layer host
+// callbacks need the same recovery rather than retaining an unreadable wrapper.
+const transientDocument={typename:'Document',get layers(){throw Error('This is not a document');}};
+let liveDocumentHits=0;
+Object.defineProperty(staleTool.ctx.app,'activeDocument',{get(){liveDocumentHits++;return liveDocumentHits<=2?transientDocument:freshDoc;}});
+vm.runInNewContext(freshExecute,staleTool.ctx);
+assert.equal(liveDocumentHits,3);
+assert.equal(freshCreated.length,2);
+assert.deepEqual(freshCreated[1].args,[60,20,60,50]);
+console.log('Passed: layer execution recovers a transient unreadable active-document wrapper');

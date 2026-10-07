@@ -1,0 +1,35 @@
+﻿// Green Overlay: logging (included by green-overlay.jsx)
+    var sessionStarted = new Date().getTime();
+    var logFile = new File(Folder.userData.fsName + "/desk-tools/green-overlay.log");
+    function logEvent(stage, error, item) {
+        try {
+            if (!logFile.parent.exists && !logFile.parent.create()) return false;
+            if (logFile.exists && logFile.length > 1024 * 1024) {
+                var previous = new File(logFile.fsName + ".1");
+                if (previous.exists) previous.remove();
+                if (!logFile.copy(previous.fsName)) return false;
+                logFile.remove();
+            }
+            logFile.encoding = "UTF-8";
+            if (!logFile.open("a")) return false;
+            try {
+                var detail = error ? String(error) : "";
+                if (error && error.line) detail += " line=" + error.line;
+                if (item) {
+                    try { detail += " type=" + item.typename; } catch (_) {}
+                }
+                logFile.writeln(new Date().toString() + " | " + stage + " | " + detail.replace(/[\r\n]+/g, " "));
+            } finally { logFile.close(); }
+            return true;
+        } catch (_) { return false; }
+    }
+
+    function showError(e) {
+        var logged = logEvent("ui.error", e);
+        var line = "";
+        try {
+            if (e && e.line) line = "\n行: " + e.line;
+        } catch (_) {}
+        alert("スクリプトエラー\n" + e + line + (logged ? "\nログ: " + logFile.fsName : "\nログを保存できませんでした。"));
+    }
+
