@@ -214,34 +214,40 @@ assert(idEntries.some(entry=>entry.ref===noIdA));
 assert(idEntries.some(entry=>entry.ref===noIdB));
 console.log('Passed: missing stacking metadata keeps distinct images, UUID duplicates are removed');
 
-// Layer targets use a separate row. Native disclosure, leaf picks and bulk picks
+// Layer targets use an external button. Native disclosure, leaf picks and bulk picks
 // must continue to operate independently of the one-rectangle layer target.
-const layerTargetRow=layerNode.items.find(row=>row._entry.layerTarget);
-assert(layerTargetRow,'layer target row exists');
+const firstLayerButton=controls.find(c=>c.text==='レイヤー全体を対象にする');
+assert(!firstLayerButton.enabled,'layer button is disabled until a layer row is selected');
 const readsBeforeLayer=reads;
 const selectionBeforeLayer=leaves.map(item=>item.selected);
-clickRow(layerTargetRow);
-assert(layerTargetRow.text.startsWith('☑'));
+clickRow(layerNode);
+assert(firstLayerButton.enabled);
+assert(!layerNode.text.includes('（対象）'),'native layer row does not itself toggle a target');
+firstLayerButton.onClick();
+assert(layerNode.text.includes('（対象）'));
 assert(controls.some(c=>c.text==='1件選択'));
-assert.deepEqual(leaves.map(item=>item.selected),selectionBeforeLayer,'layer checkbox does not change individual artwork selection');
+assert.deepEqual(leaves.map(item=>item.selected),selectionBeforeLayer,'layer button does not change individual artwork selection');
 assert.equal(reads,readsBeforeLayer,'layer click reads bounds from the loaded model, not collections');
 assert.equal(layerNode.expanded,true,'layer target selection preserves native disclosure');
 assert(bodies.at(-1).includes('var p=[5,5]'),'layer click follows the union center');
-clickRow(layerTargetRow);
-assert(layerTargetRow.text.startsWith('☐'),'same layer row toggles off');
+firstLayerButton.onClick();
+assert(!layerNode.text.includes('（対象）'),'same layer button toggles off');
 assert.equal(reads,readsBeforeLayer);
-console.log('Passed: separate layer target toggle, cached hierarchy, canvas follow and unchanged leaf picks');
+assert.equal(layerNode.items.length,2,'layer children keep their pre-feature structure: subtree toggle plus group');
+console.log('Passed: external layer button, unchanged tree children/disclosure and cached bounds');
 
 function runLayerTool(document) {
     const first=controls.length;
     const ctx={...context,$:{global:{}},app:{...context.app,documents:[document],activeDocument:document}};
     vm.runInNewContext(source,ctx);
     const own=controls.slice(first), ownTrees=own.filter(c=>c.type==='treeview');
-    return {ctx,own,destination:ownTrees[0],targets:ownTrees[1],
-        click(row){ownTrees[1].selection=row;ownTrees[1].onChange();}};
+    const layerButton=own.find(c=>c.text==='レイヤー全体を対象にする');
+    return {ctx,own,layerButton,destination:ownTrees[0],targets:ownTrees[1],
+        click(row){ownTrees[1].selection=row;ownTrees[1].onChange();},
+        pickLayer(node){ownTrees[1].selection=node;ownTrees[1].onChange();assert(layerButton.enabled);layerButton.onClick();}};
 }
 function rowFor(node, ref) { return node.items.find(row=>row._entry && row._entry.ref===ref); }
-function targetRow(node) { return node.items.find(row=>row._entry && row._entry.layerTarget); }
+function layerPicked(node) { return node.text.includes('（対象）'); }
 const bounded=(name,b,extra)=>art('PathItem',name,Object.assign({visibleBounds:b,geometricBounds:b},extra||{}));
 const mainPath=bounded('main',[10,40,30,10]);
 const lockedPath=bounded('locked',[40,50,60,5],{locked:true});
@@ -268,9 +274,9 @@ const layerDoc={typename:'Document',layers:[rootLayer],views:[{zoom:2}],
 rootLayer.parent=layerDoc;
 const layerTool=runLayerTool(layerDoc);
 const rootUI=layerTool.targets.items[0], subUI=rowFor(rootUI,sublayer);
-layerTool.click(targetRow(rootUI));
+layerTool.pickLayer(rootUI);
 assert(layerTool.own.some(c=>typeof c.text==='string' && c.text.includes('110.00 × 80.00 pt')),'layer combines visible descendants and stroke bounds');
-layerTool.click(targetRow(subUI));
+layerTool.pickLayer(subUI);
 layerTool.click(rowFor(rootUI,mainPath));
 assert(layerTool.own.some(c=>c.text==='3件選択'),'two layer targets plus one ordinary target');
 assert.equal(layerTool.ctx.$.global.__greenOverlayDiagnostic.counts.Layer,3,'target rows do not duplicate model objects');
@@ -290,17 +296,17 @@ assert.deepEqual(created.map(r=>r.args),[[100,0,160,100],[90,100,30,20],[40,10,2
 assert(created.every(r=>r.fillColor.red===0 && r.fillColor.green===255 && r.opacity===100));
 assert.equal(layerTool.ctx.app.coordinateSystem,0,'coordinate system restored');
 layerTool.own.find(c=>c.text==='全解除').onClick();
-assert(targetRow(rootUI).text.startsWith('☐') && targetRow(subUI).text.startsWith('☐'));
+assert(!layerPicked(rootUI) && !layerPicked(subUI));
 assert(layerTool.own.some(c=>c.text==='0件選択'));
 console.log('Passed: layer live bounds, nested layers, hidden/guide exclusion, locked art, clipping, duplicate names, independent targets and pre-creation snapshots');
 
 // Full-select and subtree-select retain the previous leaf-only meaning.
 layerTool.own.find(c=>c.text==='全選択').onClick();
-assert(targetRow(rootUI).text.startsWith('☐') && targetRow(subUI).text.startsWith('☐'));
+assert(!layerPicked(rootUI) && !layerPicked(subUI));
 layerTool.own.find(c=>c.text==='全解除').onClick();
 const rootSubtree=rootUI.items.find(row=>row._entry.descendantToggle);
 layerTool.click(rootSubtree);
-assert(targetRow(rootUI).text.startsWith('☐') && targetRow(subUI).text.startsWith('☐'));
+assert(!layerPicked(rootUI) && !layerPicked(subUI));
 layerTool.click(rootSubtree);
 assert(layerTool.own.some(c=>c.text==='0件選択'));
 console.log('Passed: full/subtree select retain leaf-only behavior; clear removes all layer targets');
@@ -315,8 +321,8 @@ const emptyTool=runLayerTool(emptyDoc);
 for(const ref of [emptyLayer,hiddenOnlyLayer,childOfHidden]) {
     const all=[];function visit(n){all.push(n);n.items.forEach(visit);}visit(emptyTool.targets);
     const node=all.find(n=>n._entry && n._entry.ref===ref);
-    emptyTool.click(targetRow(node));
-    assert(targetRow(node).text.startsWith('☐'));
+    emptyTool.pickLayer(node);
+    assert(!layerPicked(node));
 }
 assert(emptyTool.own.some(c=>c.text==='0件選択'));
 assert(alerts.slice(-3).every(s=>s.includes('表示中のオブジェクトがない')));
@@ -328,7 +334,7 @@ const disappearing=bounded('disappearing',[0,10,10,0]);
 const vanishingLayer=withKids(art('Layer','vanishing',{layers:[]}),[disappearing]);
 const vanishingDoc={...layerDoc,layers:[vanishingLayer],pageItems:[disappearing],pathItems:[],activeLayer:vanishingLayer};
 const vanishTool=runLayerTool(vanishingDoc);
-vanishTool.click(targetRow(vanishTool.targets.items[0]));
+vanishTool.pickLayer(vanishTool.targets.items[0]);
 disappearing.hidden=true;
 vanishTool.destination.selection=vanishTool.destination.items[0];vanishTool.destination.onChange();
 vanishTool.own.find(c=>c.text==='確認 / 実行').onClick();
@@ -358,7 +364,7 @@ const strokeOnly=bounded('stroke',[-10,30,20,-5],{geometricBounds:[0,20,10,0]});
 const maskLayer=withKids(art('Layer','compound-layer',{layers:[]}),[compoundMasked,strokeOnly]);
 const maskDoc={...layerDoc,layers:[maskLayer],pageItems:[],pathItems:[],activeLayer:maskLayer};
 const maskTool=runLayerTool(maskDoc);
-maskTool.click(targetRow(maskTool.targets.items[0]));
+maskTool.pickLayer(maskTool.targets.items[0]);
 assert(maskTool.own.some(c=>typeof c.text==='string' && c.text.includes('30.00 × 35.00 pt')));
 maskTool.destination.selection=maskTool.destination.items[0];maskTool.destination.onChange();
 maskTool.own.find(c=>c.text==='確認 / 実行').onClick();
@@ -369,8 +375,41 @@ Object.defineProperty(brokenBounds,'geometricBounds',{get(){throw Error('bounds 
 const brokenBoundsLayer=withKids(art('Layer','bounds-failure',{layers:[]}),[brokenBounds]);
 const brokenBoundsDoc={...layerDoc,layers:[brokenBoundsLayer],pageItems:[],pathItems:[],activeLayer:brokenBoundsLayer};
 const boundsFailureTool=runLayerTool(brokenBoundsDoc);
-boundsFailureTool.click(targetRow(boundsFailureTool.targets.items[0]));
-assert(targetRow(boundsFailureTool.targets.items[0]).text.startsWith('☐'));
+boundsFailureTool.pickLayer(boundsFailureTool.targets.items[0]);
+assert(!layerPicked(boundsFailureTool.targets.items[0]));
 assert(boundsFailureTool.own.some(c=>c.text==='0件選択'));
 assert(alerts.at(-1).includes('オブジェクトの範囲を取得できません'));
 console.log('Passed: compound clipping, stroke-inclusive layer bounds and unreadable bounds reject partial targets');
+
+// Some Illustrator wrappers throw when visibility is queried even while their
+// geometry is readable. Keep their bounds and the complete native child tree.
+const uncertainPath=bounded('unknown visibility',[0,20,30,0]);
+Object.defineProperty(uncertainPath,'hidden',{get(){throw Error('hidden unavailable');}});
+const uncertainGroup=withKids(art('GroupItem','unknown group'),[uncertainPath]);
+Object.defineProperty(uncertainGroup,'hidden',{get(){throw Error('hidden unavailable');}});
+const confirmedHidden=bounded('confirmed hidden',[-500,500,500,-500],{hidden:true});
+const uncertainLayer=withKids(art('Layer','unknown layer',{layers:[]}),[uncertainGroup,confirmedHidden]);
+Object.defineProperty(uncertainLayer,'visible',{get(){throw Error('visible unavailable');}});
+const uncertainDoc={...layerDoc,layers:[uncertainLayer],pageItems:[],pathItems:[],activeLayer:uncertainLayer};
+const uncertainTool=runLayerTool(uncertainDoc);
+const uncertainRoot=uncertainTool.targets.items[0], uncertainGroupRow=rowFor(uncertainRoot,uncertainGroup);
+assert(rowFor(uncertainGroupRow,uncertainPath),'leaf artwork exists before layer selection');
+const childRowsBefore=uncertainRoot.items.slice();
+const groupRowsBefore=uncertainGroupRow.items.slice();
+const alertsBeforeUnknown=alerts.length;
+uncertainTool.pickLayer(uncertainRoot);
+assert(layerPicked(uncertainRoot));
+assert.equal(alerts.length,alertsBeforeUnknown,'visibility read failure does not abort the layer target');
+assert.deepEqual(uncertainRoot.items,childRowsBefore,'layer selection never adds/removes/reorders child rows');
+assert.deepEqual(uncertainGroupRow.items,groupRowsBefore);
+assert(uncertainTool.own.some(c=>c.text==='レイヤーを対象にしました（表示状態が不明な項目を含む）。'));
+assert(uncertainTool.own.some(c=>typeof c.text==='string' && c.text.includes('30.00 × 20.00 pt')));
+uncertainTool.destination.selection=uncertainTool.destination.items[0];uncertainTool.destination.onChange();
+uncertainTool.own.find(c=>c.text==='確認 / 実行').onClick();
+assert(bodies.at(-1).includes('t:"Layer",b:[0,20,30,0]'),'live calculation also tolerates unavailable visibility, and still excludes confirmed-hidden artwork');
+uncertainTool.pickLayer(uncertainRoot);
+assert(!layerPicked(uncertainRoot));
+uncertainTool.click(uncertainGroupRow);
+assert(!uncertainTool.layerButton.enabled,'group row cannot operate the previous layer target');
+assert(logs.some(line=>line.includes('bounds.visibility')&&line.includes('Unknown visibility included')));
+console.log('Passed: throwing visibility accessors preserve bounds, child rows, retry and confirmed-hidden exclusion');
