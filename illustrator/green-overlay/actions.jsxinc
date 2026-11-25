@@ -198,8 +198,12 @@
         };
 
         w.onClose = function () {
+            // ScriptUI may fire close while trees are rebuilt; reject that until ready.
+            if (loading) {
+                try { logEvent("ui.close", "ignored during load"); } catch (_) {}
+                return false;
+            }
             try {
-                loading = false;
                 $.global.__greenOverlayDiagnostic = null;
                 $.global.__greenOverlayDiagnosticOwner = null;
                 $.global.__greenOverlayWindow = null;

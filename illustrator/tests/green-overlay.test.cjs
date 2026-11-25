@@ -21,8 +21,9 @@ const layer=container('Layer',[group]);
 const doc={typename:'Document',name:'trees.ai',layers:[layer],views:[{zoom:1}],pageItems:leaves,pathItems:leaves,activeLayer:layer,selection:[]};
 doc.pathItems.rectangle = () => { throw Error('locked destination'); };
 const controls=[], logs=[], alerts=[], bodies=[], pending=[], messages=[];
+let treesHiddenDuringLoad = false, closeWhileLoading = null;
 function control(type,text) {
-    const c={type,text,items:[],selection:null,layout:{resize(){},layout(){}},
+    const c={type,text,items:[],selection:null,visible:true,layout:{resize(){},layout(){}},
         add(type,a,b){if(this.expanded===false) this.addedWhileCollapsed=true; const child=control(type,b===undefined?a:b);child.index=this.items.length;this.items.push(child);return child;},
         removeAll(){this.items=[];},show(){shown=true; readsAtShow=reads;},update(){},close(){},hide(){}};
     controls.push(c);return c;
@@ -33,13 +34,21 @@ const context={app:{documents:[doc],activeDocument:doc,coordinateSystem:0,redraw
         const w=control('window');
         const layout=w.layout.layout.bind(w.layout);
         w.layout.layout=function(){windowLayouts++; return layout();};
-        // ScriptUI may deliver TreeView selection while w.update() pumps during load.
+        // ScriptUI may deliver TreeView selection / close while w.update() pumps during load.
         w.update=function(){
             function eachTree(node, visit) {
                 if (node.type === 'treeview') visit(node);
                 (node.items || []).forEach(child => eachTree(child, visit));
             }
-            eachTree(w, function (tv) {
+            const treeViews = [];
+            eachTree(w, tv => treeViews.push(tv));
+            if (treeViews.some(tv => tv.visible === false)) {
+                treesHiddenDuringLoad = true;
+                if (typeof w.onClose === 'function' && closeWhileLoading === null) {
+                    closeWhileLoading = w.onClose();
+                }
+            }
+            treeViews.forEach(function (tv) {
                 if (typeof tv.onChange !== 'function' || !tv.items.length) return;
                 let row = tv;
                 while (row.items && row.items.length) row = row.items[row.items.length - 1];
@@ -61,12 +70,15 @@ assert.equal(bodies.length,0,'load-time TreeView events must not pan or execute'
 assert.equal(alerts.length,0,'load-time TreeView events must not alert');
 assert(controls.some(c => c.text === '0件選択'),'spurious load selection must not pick targets');
 assert(context.$.global.__greenOverlayWindow,'palette must stay open after load');
+assert(treesHiddenDuringLoad,'both lists stay hidden while the hierarchy is built');
+assert.equal(closeWhileLoading,false,'spurious onClose during load must be rejected');
 assert(!bodies.some(body=>body.includes('__greenOverlayLoadStep')||body.includes('#targetengine')));
 assert.equal(reads,3,'one scan per container, no leaf scans');
 assert.equal(boundsReads,0,'startup does not measure artwork bounds');
 assert(windowLayouts>=2,'tree is laid out again after items exist');
 const trees=controls.filter(c=>c.type==='treeview');
 assert.equal(trees.length,2,'both lists use native arrows');
+assert(trees.every(tv => tv.visible),'lists are shown after load finishes');
 const tree=trees[0], list=trees[1];
 const layerNode=list.items[0], groupNode=layerNode.items.find(row=>row._entry.ref===group), nestedNode=groupNode.items.find(row=>row._entry.ref===nested);
 assert.equal(layerNode.type,'node');

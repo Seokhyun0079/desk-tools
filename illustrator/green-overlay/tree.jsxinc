@@ -30,6 +30,11 @@
             layerTargetButton.enabled = value && activeLayerEntry !== null;
         }
 
+        function setTreesVisible(value) {
+            try { destinationTree.visible = value; } catch (_) {}
+            try { objectList.visible = value; } catch (_) {}
+        }
+
         function scanJob(ref, depth, out, layerPath, parentEntry) {
             var t = typeOf(ref);
             var props = t === "Document" ? ["layers"] :
@@ -103,6 +108,7 @@
 
         function stopLoading(message, error) {
             loading = false;
+            setTreesVisible(true);
             enableLists(false);
             cancelLoadButton.enabled = false;
             statusText.text = message;
@@ -242,9 +248,14 @@
                         }
                         if (!uiJobs.length) {
                             finishTreeModel();
-                            loading = false; enableLists(true); updateRunState();
+                            // Keep loading=true through collapse/relayout so a host
+                            // onClose during ScriptUI thrash cannot kill the palette.
                             collapseFinishedNodes();
+                            setTreesVisible(true);
+                            enableLists(true);
+                            updateRunState();
                             relayout();
+                            loading = false;
                             statusText.text = objectRoots.length
                                 ? "準備完了"
                                 : "レイヤーを読み取れませんでした。再実行してください。";
@@ -256,8 +267,7 @@
                 }
                 var frames = ["◐", "◓", "◑", "◒"];
                 statusText.text = frames[ticks++ % 4] + (uiStarted ? " 一覧を作成中… " : " 読み込み中… ") + objectEntries.length + "件 / 調査 " + scanned + "件";
-                // Update only while scanning. Drawing thousands of nodes with update
-                // each slice is what makes the host look frozen then unstable.
+                // Trees stay hidden; only refresh the status line while scanning.
                 if (!uiStarted && (ticks % 8) === 1) {
                     suppressObjectEvent++;
                     try {
@@ -277,7 +287,8 @@
             activeLayerEntry = null;
             updateLayerTargetButton();
             // Mark loading before removeAll so host selection events cannot pick/pan.
-            loading = true; enableLists(false);
+            // Hide both lists so expand-all-then-collapse does not flash as a reload.
+            loading = true; enableLists(false); setTreesVisible(false);
             suppressObjectEvent++;
             try {
                 destinationTree.removeAll(); objectList.removeAll();
@@ -286,11 +297,7 @@
             }
             nodesToCollapse = [];
             if (!useReadableDocument()) {
-                loading = false;
-                enableLists(false);
-                cancelLoadButton.enabled = false;
-                statusText.text = "レイヤーを読み取れませんでした。再実行してください。";
-                logEvent("startup.failed", "No readable layers");
+                stopLoading("レイヤーを読み取れませんでした。再実行してください。", "No readable layers");
                 relayout();
                 return;
             }
