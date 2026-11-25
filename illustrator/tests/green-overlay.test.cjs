@@ -53,15 +53,29 @@ const context={app:{documents:[doc],activeDocument:doc,coordinateSystem:0,redraw
     RGBColor:function(){}, ElementPlacement:{PLACEATBEGINNING:1},ZOrderMethod:{BRINGTOFRONT:1},
     alert:s=>alerts.push(s),confirm:()=>true,
     BridgeTalk:function(){this.send=()=>{bodies.push(this.body);messages.push(this); if(this.body==="'ok';") pending.push(this); return true;};}};
+function drainLoad() {
+    let batches = 0;
+    while (pending.length) {
+        const bt = pending.shift();
+        assert.equal(bt.body, "'ok';");
+        assert(!bt.body.includes('__greenOverlayLoadStep'));
+        assert(!bt.body.includes('#targetengine'));
+        vm.runInNewContext(bt.body, {$: {global: {}}});
+        if (bt.onResult) bt.onResult({body: 'ok'});
+        assert(++batches < 100000, 'loader terminates');
+    }
+    return batches;
+}
 vm.runInNewContext(source,context);
 assert(shown,'window must show before work');
 assert.equal(readsAtShow,0,'window shows before page item scans');
-assert.equal(pending.length,0,'hierarchy load must not wait on BridgeTalk');
-assert.equal(bodies.length,0,'load-time TreeView events must not pan or execute');
+assert(pending.length > 0, 'large hierarchy yields via BridgeTalk after the first palette step');
+const loadBatches = drainLoad();
+assert(loadBatches > 30, 'large document is split across yield messages');
 assert.equal(alerts.length,0,'load-time TreeView events must not alert');
 assert(controls.some(c => c.text === '0件選択'),'spurious load selection must not pick targets');
 assert(context.$.global.__greenOverlayWindow,'palette must stay open after load');
-assert(!bodies.some(body=>body.includes('__greenOverlayLoadStep')||body.includes('#targetengine')));
+assert(bodies.every(body => body === "'ok';"),'load-time TreeView events must not pan or execute');
 assert.equal(reads,3,'one scan per container, no leaf scans');
 assert.equal(boundsReads,0,'startup does not measure artwork bounds');
 assert(windowLayouts>=2,'tree is laid out again after items exist');
@@ -116,6 +130,37 @@ controls.find(c=>c.text==='全解除').onClick();
 assert(controls.some(c=>c.text==='0件選択'));
 console.log('Passed: native trees, single container scan, native disclosure isolation, subtree and repeated leaf toggles, settings and host failure logs');
 
+// Cancellation must invalidate queued yield work.
+{
+    const contextCancel = {...context, $: {global: {}}};
+    vm.runInNewContext(source, contextCancel);
+    assert(pending.length > 0);
+    const readsAtCancel = reads;
+    controls.filter(c => c.text === '読み込みを中止').at(-1).onClick();
+    const queued = pending.shift();
+    vm.runInNewContext(queued.body, {$: {global: {}}});
+    queued.onResult({body: 'ok'});
+    assert.equal(reads, readsAtCancel, 'cancelled load must not continue scanning');
+    assert.equal(pending.length, 0);
+}
+console.log('Passed: BridgeTalk yield batches and cancellation');
+
+// A failed yield finishes with a capped inline fallback, then resumes yielding.
+{
+    const readsAtIdle = reads, alertsAtIdle = alerts.length;
+    const contextFail = {...context, $: {global: {}}};
+    vm.runInNewContext(source, contextFail);
+    const failed = pending.shift();
+    failed.onError({body: 'ReferenceError'});
+    drainLoad();
+    assert(reads > readsAtIdle);
+    assert.equal(alerts.length, alertsAtIdle);
+    const latestList = controls.filter(c => c.type === 'treeview').at(-1);
+    assert.equal(latestList.enabled, true);
+    assert(latestList.items[0].items.length > 1);
+}
+console.log('Passed: BridgeTalk yield failure falls back without leaving the palette dead');
+
 // The first document handle cannot list layers. The open document still fills both trees.
 let activeHits = 0;
 const broken = {typename:'Document', name:'broken', views:[{zoom:1}], get layers(){ throw new Error('This is not a document'); }};
@@ -126,6 +171,7 @@ Object.defineProperty(flakyApp, 'activeDocument', {
 const readsBefore = reads, alertsBefore = alerts.length;
 const context2 = {...context, $:{global:{}}, app: flakyApp};
 vm.runInNewContext(source, context2);
+drainLoad();
 assert.equal(alerts.length, alertsBefore);
 assert.equal(reads, readsBefore + 3);
 const recovered = controls.filter(c => c.type === 'treeview').at(-1);
@@ -161,6 +207,7 @@ mesh.parent = hostLayer;
 const docMissing = {typename:'Document', name:'missing-types', layers:[hostLayer], views:[{zoom:1}], pageItems:[], pathItems:{rectangle(){throw Error('x');}}, selection:[], activeLayer:hostLayer};
 const contextMissing = {...context, $:{global:{}}, app:{...context.app, documents:[docMissing], activeDocument:docMissing}};
 vm.runInNewContext(source, contextMissing);
+drainLoad();
 const missingList = controls.filter(c => c.type==='treeview').at(-1);
 function entriesOf(node) {
     return (node.items||[]).map(child => child._entry).filter(Boolean);
@@ -203,6 +250,7 @@ const mixedLayer = withKids(art('Layer','mixed-layer',{layers:[]}), [mixedGroup]
 mixedLayer.placedItems = [linked];
 const mixedDoc = {...docMissing,layers:[mixedLayer],activeLayer:mixedLayer};
 vm.runInNewContext(source,{...context,$:{global:{}},app:{...context.app,documents:[mixedDoc],activeDocument:mixedDoc}});
+drainLoad();
 const mixedTree = controls.filter(c=>c.type==='treeview').at(-1);
 const layerArt = entriesOf(mixedTree.items[0]).filter(entry=>!entry.descendantToggle && !entry.layerTarget);
 assert.equal(layerArt.length,1,'nested images stay inside their group');
@@ -225,6 +273,7 @@ const idLayer = withKids(art('Layer','ids',{layers:[]}),[noIdA,noIdB,uuidA,uuidB
 uuidWrapper.parent=idLayer;
 const idDoc = {...docMissing,layers:[idLayer],activeLayer:idLayer};
 vm.runInNewContext(source,{...context,$:{global:{}},app:{...context.app,documents:[idDoc],activeDocument:idDoc}});
+drainLoad();
 const idTree=controls.filter(c=>c.type==='treeview').at(-1);
 const idEntries=entriesOf(idTree.items[0]).filter(entry=>!entry.descendantToggle && !entry.layerTarget);
 assert.equal(idEntries.length,4,'keep distinct images and deduplicate repeated references or UUIDs');
@@ -263,6 +312,7 @@ function runLayerTool(document) {
     const first=controls.length;
     const ctx={...context,$:{global:{}},app:{...context.app,documents:[document],activeDocument:document}};
     vm.runInNewContext(source,ctx);
+    drainLoad();
     const own=controls.slice(first), ownTrees=own.filter(c=>c.type==='treeview');
     const layerButton=own.find(c=>c.text==='レイヤー全体を対象にする');
     return {ctx,own,layerButton,destination:ownTrees[0],targets:ownTrees[1],

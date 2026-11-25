@@ -39,12 +39,56 @@
                 col: null, index: 0, length: 0, refs: [], seen: {}, counts: {}, stage: 0, build: 0};
         }
 
-        // A BridgeTalk callback can run while the open file is temporarily "not a document".
-        // Layer reads there finish as an empty tree and the status still says ready.
-        // Read the hierarchy in this turn, after the window is visible.
-        function runLoadInline() {
+        // Illustrator ignores #targetengine in BridgeTalk bodies, so the body cannot
+        // call palette functions. Yield with "'ok';" and continue from onResult.
+        // A busy while(loading) loop makes the host 応答なし on large documents.
+        var loadPump = 0;
+
+        function queueLoadStep() {
+            if (!loading) return;
+            var pump = ++loadPump;
+            var bt = new BridgeTalk();
             try {
-                while (loading) loadStep(loadToken);
+                bt.target = BridgeTalk.appSpecifier || "illustrator";
+            } catch (_) {
+                bt.target = "illustrator";
+            }
+            bt.body = "'ok';";
+            bt.onResult = function () {
+                if (pump !== loadPump || !loading) return;
+                try {
+                    if (!useReadableDocument() && scanJobs.length) {
+                        stopLoading("レイヤーを読み取れませんでした。再実行してください。", "Unreadable during load");
+                        return;
+                    }
+                    loadStep(loadToken);
+                } catch (e) {
+                    stopLoading("読み込みに失敗しました。", e);
+                    showError(e);
+                    return;
+                }
+                if (loading) queueLoadStep();
+            };
+            bt.onError = function (message) {
+                if (pump !== loadPump || !loading) return;
+                var detail = message && message.body !== undefined ? message.body : message;
+                logEvent("bridgetalk.load", detail);
+                loadPump++;
+                runLoadInlineFallback();
+            };
+            if (!bt.send()) {
+                logEvent("bridgetalk.load", "BridgeTalk send failed");
+                loadPump++;
+                runLoadInlineFallback();
+            }
+        }
+
+        // Only when BridgeTalk cannot yield. Cap steps so a failed pump cannot hang forever.
+        function runLoadInlineFallback() {
+            try {
+                var steps = 0;
+                while (loading && steps++ < 200) loadStep(loadToken);
+                if (loading) queueLoadStep();
             } catch (e) {
                 stopLoading("読み込みに失敗しました。", e);
                 showError(e);
@@ -103,6 +147,7 @@
 
         function stopLoading(message, error) {
             loading = false;
+            loadPump++;
             enableLists(false);
             cancelLoadButton.enabled = false;
             statusText.text = message;
@@ -150,10 +195,12 @@
             if (job.build < job.refs.length) {
                 var ref = job.refs[job.build++], structural = isStructuralContainer(ref);
                 var kind = kindLabel(ref);
+                // Defer uuid reads until execute/destination capture. Per-item uuid
+                // during scan can stall large documents on some hosts.
                 var entry = {id: objectEntries.length, ref: ref, depth: job.depth,
                     selectable: !structural, children: [], parentEntry: job.parentEntry,
                     leafCount: structural ? 0 : 1, pickedLeaves: 0,
-                    kind: kind, label: labeledName(ref, job.counts, kind), uuid: artworkUuid(ref),
+                    kind: kind, label: labeledName(ref, job.counts, kind), uuid: null,
                     itemType: typeOf(ref)};
                 if (entry.itemType === "Layer") {
                     for (var a = 0; a < job.layerAddresses.length; a++) {
@@ -253,11 +300,14 @@
                 }
                 var frames = ["◐", "◓", "◑", "◒"];
                 statusText.text = frames[ticks++ % 4] + (uiStarted ? " 一覧を作成中… " : " 読み込み中… ") + objectEntries.length + "件 / 調査 " + scanned + "件";
-                suppressObjectEvent++;
-                try {
-                    try { w.update(); } catch (_) {}
-                } finally {
-                    suppressObjectEvent--;
+                // Pump ScriptUI sparingly; every step update stalls large trees.
+                if ((ticks % 4) === 1) {
+                    suppressObjectEvent++;
+                    try {
+                        try { w.update(); } catch (_) {}
+                    } finally {
+                        suppressObjectEvent--;
+                    }
                 }
             } catch (e) { stopLoading("読み込みに失敗しました。", e); showError(e); }
         }
@@ -271,6 +321,7 @@
             updateLayerTargetButton();
             // Mark loading before removeAll so host selection events cannot pick/pan.
             loading = true; enableLists(false);
+            loadPump++;
             suppressObjectEvent++;
             try {
                 destinationTree.removeAll(); objectList.removeAll();
@@ -278,6 +329,8 @@
                 suppressObjectEvent--;
             }
             nodesToCollapse = [];
+            // First document reads happen in this palette turn after the window is shown.
+            // BridgeTalk callbacks alone can briefly see an unreadable document wrapper.
             if (!useReadableDocument()) {
                 loading = false;
                 enableLists(false);
@@ -291,6 +344,13 @@
             $.global.__greenOverlayDiagnosticOwner = doc;
             scanJobs = [scanJob(doc, 0, objectRoots)]; uiJobs = []; uiStarted = false;
             statusText.text = "読み込み中…";
-            runLoadInline();
+            try {
+                loadStep(loadToken);
+            } catch (e) {
+                stopLoading("読み込みに失敗しました。", e);
+                showError(e);
+                return;
+            }
+            if (loading) queueLoadStep();
         }
 

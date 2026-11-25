@@ -1,5 +1,13 @@
 # Illustrator 툴 실패·재발 방지 기록
 
+## 2026-11-25 — 오버레이 읽기 시 응답 없음으로 정지 (사용자 보고)
+
+기준: `fix/overlay-targets-and-document-scope`의 `7178248`. 이전 수정으로 로드 중 TreeView 이벤트 폭주는 막았지만, `while (loading) loadStep()` 인라인 바쁜 루프가 대형 문서에서 Illustrator 메인 스레드를 반환하지 않아 응답 없음이 됐다.
+
+수정: 창 표시 후 첫 `loadStep`만 팔레트 턴에서 수행해 문서를 확인한 뒤, BridgeTalk `'ok';` + `onResult`로 이후 단계를 양보한다. 본문에는 팔레트 함수/`#targetengine`을 넣지 않는다. 스캔 시 항목마다 `uuid`를 읽지 않고 실행·생성처 확정 때 읽는다. `w.update()`는 매 단계가 아니라 간헐적으로만 호출한다. 로드 중 선택 이벤트 무시는 유지한다.
+
+검증: 모의 환경에서 yield 배치·취소·yield 실패 후 폴백, 로드 중 선택 이벤트 무시를 확인했다. 실제 Illustrator의 대형 문서 체감은 미검증이다.
+
 ## 2026-11-25 — 오버레이 열기만 해도 목록 깜빡임 후 창이 닫힘 (사용자 보고)
 
 기준: `fix/overlay-targets-and-document-scope`의 `8f50b29` (PR #10). 사용자는 조작 없이 스크립트만 열었을 때 창이 잠시 멈춘 뒤 상·하 목록이 깜빡이다가 닫힌다고 보고했다.

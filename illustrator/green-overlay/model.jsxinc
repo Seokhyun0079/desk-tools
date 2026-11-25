@@ -128,6 +128,14 @@
             return null;
         }
 
+        function ensureEntryUuid(entry) {
+            if (!entry) return null;
+            if (entry.uuidReady) return entry.uuid;
+            entry.uuidReady = true;
+            entry.uuid = artworkUuid(entry.ref);
+            return entry.uuid;
+        }
+
         function sameItem(a, b) {
             if (!a || !b) return false;
             try { if (a === b) return true; } catch (_) {}

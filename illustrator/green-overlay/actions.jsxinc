@@ -200,6 +200,7 @@
         w.onClose = function () {
             try {
                 loading = false;
+                loadPump++;
                 $.global.__greenOverlayDiagnostic = null;
                 $.global.__greenOverlayDiagnosticOwner = null;
                 $.global.__greenOverlayWindow = null;

@@ -27,7 +27,7 @@
                 if (entry.itemType === "Layer") {
                     hasLayers = true;
                     try { keys[index] = layerTargetKey(entry); } catch (e) { logEvent("execute.capture", e); }
-                } else if (canLookup && entry.uuid) {
+                } else if (canLookup && ensureEntryUuid(entry)) {
                     keys[index] = uuidKey(entry.uuid);
                 } else {
                     pending.push({index: index, ref: entry.ref});
@@ -49,14 +49,15 @@
 
         function groupStep(entry) {
             var parent = entry.parentEntry.ref, props = ["groupItems", "pageItems"];
+            var uuid = ensureEntryUuid(entry);
             for (var p = 0; p < props.length; p++) {
                 try {
                     var items = parent[props[p]], count = items.length;
                     for (var i = 0; i < count; i++) {
                         var item = items[i];
-                        if (item != entry.ref && !(entry.uuid && artworkUuid(item) === entry.uuid)) continue;
+                        if (item != entry.ref && !(uuid && artworkUuid(item) === uuid)) continue;
                         return '{c:"' + props[p] + '",i:' + i + ',n:"' + jsString(item.name || "") +
-                            '",u:"' + jsString(entry.uuid || "") + '"}';
+                            '",u:"' + jsString(uuid || "") + '"}';
                     }
                 } catch (_) {}
             }
@@ -64,7 +65,9 @@
         }
 
         function destinationKey(entry, canLookup) {
-            if (entry.itemType === "GroupItem" && canLookup && entry.uuid) return uuidKey(entry.uuid);
+            if (entry.itemType === "GroupItem" && canLookup && ensureEntryUuid(entry)) {
+                return uuidKey(entry.uuid);
+            }
             var groups = [];
             while (entry && entry.itemType === "GroupItem") {
                 groups.unshift(groupStep(entry));
