@@ -340,8 +340,8 @@
             return t === "Layer" || t === "GroupItem" || t === "CompoundPathItem";
         }
 
-        function labeledName(item, counts) {
-            var kind = kindLabel(item);
+        function labeledName(item, counts, kind) {
+            kind = kind || kindLabel(item);
             if (!counts[kind]) counts[kind] = 0;
             counts[kind]++;
             return displayName(item, kind + " " + counts[kind]);
@@ -358,7 +358,8 @@
             if (value) picked[entry.id] = true;
             else delete picked[entry.id];
             pickedCount += delta;
-            entry.ui.text = objectRowText(entry);
+            // Rows may not have UI yet while the tree is still being drawn.
+            if (entry.ui) entry.ui.text = objectRowText(entry);
             if (!entry.selectable) return;
             for (var parent = entry.parentEntry; parent; parent = parent.parentEntry) {
                 var before = descendantSelectionState(parent);
@@ -379,7 +380,7 @@
             }
 
             return check +
-                entry.label + "  [" + kindLabel(entry.ref) + "]" +
+                entry.label + "  [" + (entry.kind || kindLabel(entry.ref)) + "]" +
                 (entry.itemType === "Layer" && picked[entry.id] ? " （対象）" : "");
         }
 

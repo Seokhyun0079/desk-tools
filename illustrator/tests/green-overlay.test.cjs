@@ -33,6 +33,21 @@ const context={app:{documents:[doc],activeDocument:doc,coordinateSystem:0,redraw
         const w=control('window');
         const layout=w.layout.layout.bind(w.layout);
         w.layout.layout=function(){windowLayouts++; return layout();};
+        // ScriptUI may deliver TreeView selection while w.update() pumps during load.
+        w.update=function(){
+            function eachTree(node, visit) {
+                if (node.type === 'treeview') visit(node);
+                (node.items || []).forEach(child => eachTree(child, visit));
+            }
+            eachTree(w, function (tv) {
+                if (typeof tv.onChange !== 'function' || !tv.items.length) return;
+                let row = tv;
+                while (row.items && row.items.length) row = row.items[row.items.length - 1];
+                if (row === tv) return;
+                tv.selection = row;
+                tv.onChange();
+            });
+        };
         return w;
     },
     RGBColor:function(){}, ElementPlacement:{PLACEATBEGINNING:1},ZOrderMethod:{BRINGTOFRONT:1},
@@ -42,6 +57,10 @@ vm.runInNewContext(source,context);
 assert(shown,'window must show before work');
 assert.equal(readsAtShow,0,'window shows before page item scans');
 assert.equal(pending.length,0,'hierarchy load must not wait on BridgeTalk');
+assert.equal(bodies.length,0,'load-time TreeView events must not pan or execute');
+assert.equal(alerts.length,0,'load-time TreeView events must not alert');
+assert(controls.some(c => c.text === '0件選択'),'spurious load selection must not pick targets');
+assert(context.$.global.__greenOverlayWindow,'palette must stay open after load');
 assert(!bodies.some(body=>body.includes('__greenOverlayLoadStep')||body.includes('#targetengine')));
 assert.equal(reads,3,'one scan per container, no leaf scans');
 assert.equal(boundsReads,0,'startup does not measure artwork bounds');

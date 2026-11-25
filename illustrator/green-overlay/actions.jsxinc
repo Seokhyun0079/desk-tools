@@ -1,6 +1,8 @@
 ﻿// Green Overlay: actions (included by green-overlay.jsx)
         destinationTree.onChange = function () {
             try {
+                // ScriptUI can fire onChange while trees are rebuilt during load.
+                if (loading || suppressObjectEvent > 0) return;
                 if (destinationTree.selection !== null) {
                     statusText.text =
                         "作成先: " + destinationTree.selection.text;
@@ -18,13 +20,15 @@
         }
 
         layerTargetButton.onClick = function () {
-            if (loading || !activeLayerEntry || paletteDocumentState() < 0) return;
+            if (loading || !activeLayerEntry) return;
+            var documentState = paletteDocumentState();
+            if (documentState < 0) return;
             var entry = activeLayerEntry;
             try {
                 var turnOn = !picked[entry.id];
                 setPicked(entry, turnOn);
                 updateCountAndInfo(entry);
-                if (turnOn) requestCanvasFollow(entry);
+                if (turnOn && documentState > 0) requestCanvasFollow(entry);
                 statusText.text = turnOn
                     ? "レイヤーを対象にしました。範囲は実行時に取得します。"
                     : "レイヤー対象を解除しました。";
@@ -36,7 +40,8 @@
             try {
                 var row, entry, i;
 
-                if (suppressObjectEvent > 0 || inObjectListHandler) return;
+                // Tree rebuild calls w.update(); host selection must not run pick/pan there.
+                if (loading || suppressObjectEvent > 0 || inObjectListHandler) return;
                 inObjectListHandler = true;
 
                 row = objectList.selection;
@@ -84,7 +89,7 @@
                     setPicked(entry, !picked[entry.id]);
                     updateCountAndInfo(entry);
                     if (documentState > 0) applyIllustratorSelection(entry);
-                    if (picked[entry.id]) requestCanvasFollow(entry);
+                    if (picked[entry.id] && documentState > 0) requestCanvasFollow(entry);
                     suppressObjectEvent++;
                     try { objectList.selection = null; } catch (_) {}
                     suppressObjectEvent--;
@@ -198,8 +203,6 @@
                 $.global.__greenOverlayDiagnostic = null;
                 $.global.__greenOverlayDiagnosticOwner = null;
                 $.global.__greenOverlayWindow = null;
-                try { w.hide(); } catch (_) {}
-                try { w.close(); } catch (_) {}
             } catch (_) {}
             return true;
         };

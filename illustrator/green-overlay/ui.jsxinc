@@ -134,7 +134,7 @@
                     var b = boundsOf(entry);
                     infoText.text =
                         "名前: " + entry.label +
-                        "\n種類: " + kindLabel(entry.ref) +
+                        "\n種類: " + (entry.kind || kindLabel(entry.ref)) +
                         " / サイズ: " +
                         b.width.toFixed(2) + " × " +
                         b.height.toFixed(2) + " pt" +

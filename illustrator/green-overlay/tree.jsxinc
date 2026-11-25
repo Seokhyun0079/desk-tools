@@ -52,17 +52,27 @@
         }
 
         function collapseFinishedNodes() {
-            for (var i = nodesToCollapse.length - 1; i >= 0; i--) {
-                try { nodesToCollapse[i].expanded = false; } catch (_) {}
+            suppressObjectEvent++;
+            try {
+                for (var i = nodesToCollapse.length - 1; i >= 0; i--) {
+                    try { nodesToCollapse[i].expanded = false; } catch (_) {}
+                }
+            } finally {
+                suppressObjectEvent--;
             }
             nodesToCollapse = [];
         }
 
         function relayout() {
-            try { w.layout.layout(true); } catch (e) { logEvent("ui.layout", e); }
-            try { destinationTree.layout.layout(true); } catch (_) {}
-            try { objectList.layout.layout(true); } catch (_) {}
-            try { w.update(); } catch (_) {}
+            suppressObjectEvent++;
+            try {
+                try { w.layout.layout(true); } catch (e) { logEvent("ui.layout", e); }
+                try { destinationTree.layout.layout(true); } catch (_) {}
+                try { objectList.layout.layout(true); } catch (_) {}
+                try { w.update(); } catch (_) {}
+            } finally {
+                suppressObjectEvent--;
+            }
         }
 
         function layerLength(target) {
@@ -139,10 +149,12 @@
             }
             if (job.build < job.refs.length) {
                 var ref = job.refs[job.build++], structural = isStructuralContainer(ref);
+                var kind = kindLabel(ref);
                 var entry = {id: objectEntries.length, ref: ref, depth: job.depth,
                     selectable: !structural, children: [], parentEntry: job.parentEntry,
                     leafCount: structural ? 0 : 1, pickedLeaves: 0,
-                    label: labeledName(ref, job.counts), uuid: artworkUuid(ref), itemType: typeOf(ref)};
+                    kind: kind, label: labeledName(ref, job.counts, kind), uuid: artworkUuid(ref),
+                    itemType: typeOf(ref)};
                 if (entry.itemType === "Layer") {
                     for (var a = 0; a < job.layerAddresses.length; a++) {
                         if (sameItem(job.layerAddresses[a].ref, ref)) {
@@ -160,34 +172,39 @@
         }
 
         function drawOne(job) {
-            var entry = job.entry;
-            var node = job.objectParent.add(entry.children.length ? "node" : "item", objectRowText(entry));
-            // Expand only after a real child exists; an empty node may ignore it.
-            if (job.objectParent !== objectList) job.objectParent.expanded = true;
-            node._entry = entry; entry.ui = node;
-            if (entry.children.length) {
-                nodesToCollapse.push(node);
-                var toggle = node.add("item", "☐ 配下を全選択 / 全解除");
-                node.expanded = true;
-                toggle._entry = {descendantToggle: true, parentEntry: entry};
-                entry.toggleUI = toggle;
-            }
-            var destParent = job.destParent;
-            if (isDestination(entry.ref)) {
-                var hasDest = false;
-                for (var k = 0; k < entry.children.length; k++) {
-                    if (isDestination(entry.children[k].ref)) { hasDest = true; break; }
+            suppressObjectEvent++;
+            try {
+                var entry = job.entry;
+                var node = job.objectParent.add(entry.children.length ? "node" : "item", objectRowText(entry));
+                // Expand only after a real child exists; an empty node may ignore it.
+                if (job.objectParent !== objectList) job.objectParent.expanded = true;
+                node._entry = entry; entry.ui = node;
+                if (entry.children.length) {
+                    nodesToCollapse.push(node);
+                    var toggle = node.add("item", "☐ 配下を全選択 / 全解除");
+                    node.expanded = true;
+                    toggle._entry = {descendantToggle: true, parentEntry: entry};
+                    entry.toggleUI = toggle;
                 }
-                var dest = destParent.add(hasDest ? "node" : "item", entry.label + "  [" + kindLabel(entry.ref) + "]");
-                if (destParent !== destinationTree) destParent.expanded = true;
-                dest._entry = entry;
-                if (hasDest) {
-                    nodesToCollapse.push(dest);
+                var destParent = job.destParent;
+                if (isDestination(entry.ref)) {
+                    var hasDest = false;
+                    for (var k = 0; k < entry.children.length; k++) {
+                        if (isDestination(entry.children[k].ref)) { hasDest = true; break; }
+                    }
+                    var dest = destParent.add(hasDest ? "node" : "item", entry.label + "  [" + entry.kind + "]");
+                    if (destParent !== destinationTree) destParent.expanded = true;
+                    dest._entry = entry;
+                    if (hasDest) {
+                        nodesToCollapse.push(dest);
+                    }
+                    destParent = dest;
                 }
-                destParent = dest;
-            }
-            for (var i = entry.children.length - 1; i >= 0; i--) {
-                uiJobs.push({entry: entry.children[i], objectParent: node, destParent: destParent});
+                for (var i = entry.children.length - 1; i >= 0; i--) {
+                    uiJobs.push({entry: entry.children[i], objectParent: node, destParent: destParent});
+                }
+            } finally {
+                suppressObjectEvent--;
             }
         }
 
@@ -236,7 +253,12 @@
                 }
                 var frames = ["◐", "◓", "◑", "◒"];
                 statusText.text = frames[ticks++ % 4] + (uiStarted ? " 一覧を作成中… " : " 読み込み中… ") + objectEntries.length + "件 / 調査 " + scanned + "件";
-                w.update();
+                suppressObjectEvent++;
+                try {
+                    try { w.update(); } catch (_) {}
+                } finally {
+                    suppressObjectEvent--;
+                }
             } catch (e) { stopLoading("読み込みに失敗しました。", e); showError(e); }
         }
         var uiStarted = false;
@@ -247,9 +269,15 @@
             objectEntries = []; objectRoots = []; picked = {}; pickedCount = 0;
             activeLayerEntry = null;
             updateLayerTargetButton();
-            destinationTree.removeAll(); objectList.removeAll();
-            nodesToCollapse = [];
+            // Mark loading before removeAll so host selection events cannot pick/pan.
             loading = true; enableLists(false);
+            suppressObjectEvent++;
+            try {
+                destinationTree.removeAll(); objectList.removeAll();
+            } finally {
+                suppressObjectEvent--;
+            }
+            nodesToCollapse = [];
             if (!useReadableDocument()) {
                 loading = false;
                 enableLists(false);
