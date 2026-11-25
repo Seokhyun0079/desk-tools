@@ -1,12 +1,16 @@
 # Illustrator 툴 실패·재발 방지 기록
 
+## 2026-11-25 — BridgeTalk yield 후 오버레이가 즉시 닫힘 (사용자 보고)
+
+기준: `fix/overlay-targets-and-document-scope`의 `874e0e4`. 응답 없음 완화를 위해 계층 로딩을 BridgeTalk `'ok';` yield로 나눴더니, 열자마자 팔레트가 바로 닫혔다. 이 호스트에서는 자기 자신으로 보내는 BridgeTalk가 ScriptUI palette를 유지하지 못하거나, send 실패 시 폴백 재귀가 불안정했다.
+
+수정: 열기 경로의 BridgeTalk yield를 철회하고, 창을 표시한 같은 팔레트 턴의 인라인 로더로 되돌린다. 로드 중 선택 이벤트 무시, 스캔 시 uuid 지연, 스캔 단계의 간헐적 `w.update()`, UI 그리기 중 update 생략, 더 큰 작업 슬라이스는 유지한다.
+
+검증: 모의 환경에서 BridgeTalk 대기 없이 로드 완료, 로드 중 선택 이벤트 무시, 기존 선택/생성 검사를 확인했다. 실제 Illustrator의 대형 문서 체감은 미검증이다.
+
 ## 2026-11-25 — 오버레이 읽기 시 응답 없음으로 정지 (사용자 보고)
 
-기준: `fix/overlay-targets-and-document-scope`의 `7178248`. 이전 수정으로 로드 중 TreeView 이벤트 폭주는 막았지만, `while (loading) loadStep()` 인라인 바쁜 루프가 대형 문서에서 Illustrator 메인 스레드를 반환하지 않아 응답 없음이 됐다.
-
-수정: 창 표시 후 첫 `loadStep`만 팔레트 턴에서 수행해 문서를 확인한 뒤, BridgeTalk `'ok';` + `onResult`로 이후 단계를 양보한다. 본문에는 팔레트 함수/`#targetengine`을 넣지 않는다. 스캔 시 항목마다 `uuid`를 읽지 않고 실행·생성처 확정 때 읽는다. `w.update()`는 매 단계가 아니라 간헐적으로만 호출한다. 로드 중 선택 이벤트 무시는 유지한다.
-
-검증: 모의 환경에서 yield 배치·취소·yield 실패 후 폴백, 로드 중 선택 이벤트 무시를 확인했다. 실제 Illustrator의 대형 문서 체감은 미검증이다.
+기준: `fix/overlay-targets-and-document-scope`의 `7178248`. 이전 수정으로 로드 중 TreeView 이벤트 폭주는 막았지만, `while (loading) loadStep()` 인라인 바쁜 루프가 대형 문서에서 Illustrator 메인 스레드를 반환하지 않아 응답 없음이 됐다. BridgeTalk yield 시도는 즉시 창 닫힘으로 이어져 철회했다.
 
 ## 2026-11-25 — 오버레이 열기만 해도 목록 깜빡임 후 창이 닫힘 (사용자 보고)
 
