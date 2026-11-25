@@ -23,7 +23,7 @@ const controls=[];
 function control(type,text) {
     return {type,text,add(type,a,b){const c=control(type,b);controls.push(c);return c;},show(){shows++;},update(){updates++;},close(){}};
 }
-const globals={__greenOverlayDiagnostic:{schema:'overlay-counts-v1',state:'ready',counts:{Layer:1,TextFrame:3,PlacedItem:2,[secret]:99}}};
+const globals={__greenOverlayDiagnosticOwner:doc,__greenOverlayDiagnostic:{schema:'overlay-counts-v1',state:'ready',counts:{Layer:1,TextFrame:3,PlacedItem:2,[secret]:99}}};
 Object.defineProperty(globals,'__greenOverlayWindow',{get(){throw Error('must not traverse existing UI');}});
 const app={documents:[doc],version:'29.0 '+secret};
 Object.defineProperty(app,'activeDocument',{get(){assert(shows>0);return doc;}});
@@ -46,3 +46,13 @@ vm.runInNewContext(source,{...context,app:{documents:[]},$:{global:{}}});
 report=controls.find(c=>c.type==='edittext').text;
 assert(report.includes('No open document'));
 console.log('Passed: constant collection reads, zero element/parent/UI traversal, window shown first, cached counts, private fields untouched, sanitized errors');
+
+controls.length = 0;
+const another = Object.fromEntries(props.map(p => [p, {length: 3}]));
+vm.runInNewContext(source, {...context, app: {documents: [doc, another], activeDocument: another}});
+const otherReport = controls.find(c => c.type === 'edittext').text;
+assert.match(otherReport, /placedItems=3/);
+assert.match(otherReport, /OverlaySnapshot=unavailable/);
+assert(!otherReport.includes('PlacedItem=2'));
+assert.equal(sensitiveReads, 0, 'ownership checks must not query document names or content');
+console.log('Passed: diagnostics only compare counts from the active document');

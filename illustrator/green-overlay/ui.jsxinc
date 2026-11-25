@@ -113,58 +113,34 @@
             return { r: r, g: g, b: b, opacity: opacity };
         }
 
-        function selectedCount() {
-            var count = 0;
-            var i;
-            for (i = 0; i < objectEntries.length; i++) {
-                if (picked[objectEntries[i].id]) count++;
-            }
-            return count;
-        }
-
         function updateRunState() {
             runButton.enabled =
-                selectedCount() > 0 &&
+                pickedCount > 0 &&
                 destinationTree.selection !== null;
         }
 
-        function labelOfItem(item) {
-            var i, entry;
-            for (i = 0; i < objectEntries.length; i++) {
-                entry = objectEntries[i];
-                if (entry.ref === item || sameItem(entry.ref, item)) return entry.label;
-            }
-            return displayName(item, kindLabel(item));
-        }
-
-        function updateCountAndInfo(clickedItem) {
-            var count = selectedCount();
+        function updateCountAndInfo(entry) {
+            var count = pickedCount;
             countText.text = count + "件選択";
 
-            if (clickedItem) {
-                var pendingLayer = null;
-                for (var i = 0; i < objectEntries.length; i++) {
-                    if (objectEntries[i].ref === clickedItem && objectEntries[i].itemType === "Layer") {
-                        pendingLayer = objectEntries[i]; break;
-                    }
-                }
-                if (pendingLayer && !pendingLayer.targetBounds) {
-                    infoText.text = "名前: " + pendingLayer.label +
+            if (entry) {
+                if (entry.itemType === "Layer" && !entry.targetBounds) {
+                    infoText.text = "名前: " + entry.label +
                         "\n種類: レイヤー / サイズ: 取得待ち / 選択中: " + count + "件";
                     updateRunState();
                     return;
                 }
                 try {
-                    var b = boundsOf(clickedItem);
+                    var b = boundsOf(entry);
                     infoText.text =
-                        "名前: " + labelOfItem(clickedItem) +
-                        "\n種類: " + kindLabel(clickedItem) +
+                        "名前: " + entry.label +
+                        "\n種類: " + (entry.kind || kindLabel(entry.ref)) +
                         " / サイズ: " +
                         b.width.toFixed(2) + " × " +
                         b.height.toFixed(2) + " pt" +
                         " / 選択中: " + count + "件";
                 } catch (e) {
-                    logEvent("bounds.info", e, clickedItem);
+                    logEvent("bounds.info", e, entry.ref);
                     infoText.text = count + "件のオブジェクトを選択中";
                 }
             } else {

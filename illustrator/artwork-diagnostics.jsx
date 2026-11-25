@@ -40,7 +40,10 @@
             }
             // The overlay captures this plain-data snapshot during its existing
             // load. Diagnostics never rereads its artwork references or UI nodes.
-            var snapshot = $.global.__greenOverlayDiagnostic;
+            var snapshot = null;
+            try {
+                if ($.global.__greenOverlayDiagnosticOwner == doc) snapshot = $.global.__greenOverlayDiagnostic;
+            } catch (_) {}
             if (snapshot && snapshot.schema === "overlay-counts-v1") {
                 lines.push("OverlaySnapshot=" + (snapshot.state === "ready" ? "ready" : "not-ready"));
                 lines.push("LOADED TARGET COUNTS (cached during overlay load)");

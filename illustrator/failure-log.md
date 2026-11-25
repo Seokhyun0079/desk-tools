@@ -1,5 +1,37 @@
 # Illustrator 툴 실패·재발 방지 기록
 
+## 2026-11-25 — 목록이 깜빡이다가 오버레이가 닫힘 (사용자 보고)
+
+기준: `fix/overlay-targets-and-document-scope`의 `b88de0a`. BridgeTalk yield를 철회한 뒤, 열면 상·하 리스트가 리로드처럼 깜빡이다가 창이 닫혔다.
+
+확인한 경로: 인라인 로더가 자식을 붙이기 위해 노드를 펼쳤다가 마지막에 접는다. 그 ScriptUI 변동이 목록 깜빡임으로 보인다. 같은 구간에서 호스트가 `onClose`를 보내면 이전 핸들러가 이를 받아들여 팔레트 전역 참조를 끊었다.
+
+수정: 로드가 끝날 때까지 두 TreeView를 숨긴다. `loading`이 true인 동안 `onClose`는 `false`를 반환한다. 접기·relayout이 끝난 뒤에야 `loading`을 끈다.
+
+검증: 모의 `w.update()`가 로드 중 `onClose`를 호출해도 거부되고 창 참조가 남는지, 로드 중 리스트가 숨겨졌다가 완료 후 다시 보이는지 확인했다.
+
+## 2026-11-25 — BridgeTalk yield 후 오버레이가 즉시 닫힘 (사용자 보고)
+
+기준: `fix/overlay-targets-and-document-scope`의 `874e0e4`. 응답 없음 완화를 위해 계층 로딩을 BridgeTalk `'ok';` yield로 나눴더니, 열자마자 팔레트가 바로 닫혔다. 이 호스트에서는 자기 자신으로 보내는 BridgeTalk가 ScriptUI palette를 유지하지 못하거나, send 실패 시 폴백 재귀가 불안정했다.
+
+수정: 열기 경로의 BridgeTalk yield를 철회하고, 창을 표시한 같은 팔레트 턴의 인라인 로더로 되돌린다. 로드 중 선택 이벤트 무시, 스캔 시 uuid 지연, 스캔 단계의 간헐적 `w.update()`, UI 그리기 중 update 생략, 더 큰 작업 슬라이스는 유지한다.
+
+검증: 모의 환경에서 BridgeTalk 대기 없이 로드 완료, 로드 중 선택 이벤트 무시, 기존 선택/생성 검사를 확인했다. 실제 Illustrator의 대형 문서 체감은 미검증이다.
+
+## 2026-11-25 — 오버레이 읽기 시 응답 없음으로 정지 (사용자 보고)
+
+기준: `fix/overlay-targets-and-document-scope`의 `7178248`. 이전 수정으로 로드 중 TreeView 이벤트 폭주는 막았지만, `while (loading) loadStep()` 인라인 바쁜 루프가 대형 문서에서 Illustrator 메인 스레드를 반환하지 않아 응답 없음이 됐다. BridgeTalk yield 시도는 즉시 창 닫힘으로 이어져 철회했다.
+
+## 2026-11-25 — 오버레이 열기만 해도 목록 깜빡임 후 창이 닫힘 (사용자 보고)
+
+기준: `fix/overlay-targets-and-document-scope`의 `8f50b29` (PR #10). 사용자는 조작 없이 스크립트만 열었을 때 창이 잠시 멈춘 뒤 상·하 목록이 깜빡이다가 닫힌다고 보고했다.
+
+확인한 실패 경로: 인라인 로더가 트리를 그리며 `w.update()`로 ScriptUI를 펌핑한다. 호스트는 이 때 TreeView `onChange`를 보낼 수 있는데, `handleObjectListEvent`가 `loading`을 무시했다. 선택 핸들러는 `setPicked`·경계 조회·Illustrator 선택·BridgeTalk 화면 이동까지 수행했고, 아직 그려지지 않은 행의 `entry.ui` 대입은 예외→`alert`로 이어질 수 있었다. `removeAll`도 `loading=true` 이전에 호출됐다. `onClose`가 다시 `w.close()`를 호출해 정리 중 창을 강제로 닫을 여지도 있었다.
+
+수정: 로딩 중·트리 변경 중의 목록 이벤트를 무시한다. `loading`을 `removeAll` 전에 켠다. `drawOne`/`collapse`/`relayout`/`w.update`를 `suppressObjectEvent`로 감싼다. `setPicked`는 UI가 있을 때만 행 텍스트를 갱신하고, 종류 라벨은 스캔 시 캐시한다. 화면 추적은 문서가 확인될 때만 요청한다. `onClose`는 전역 참조만 정리한다.
+
+검증: 모의 `w.update()`가 로드 중 최하위 행을 선택해 `onChange`를 쏘도록 바꾼 뒤, 기동 시 BridgeTalk·alert·선택 건수·bounds 조회가 없음을 확인했다. 기존 선택/생성/문서 범위 검사도 통과했다. 실제 Illustrator에서의 대형 문서 동작은 미검증이다.
+
 ## 2026-10-07 — 하위 표시 복구 후 남은 레이어 오류·파일 분할
 
 기준: `main`의 `ba2f3df` (PR #8). 사용자가 하위 표시 복구는 확인했으나 오류가 남는다고 보고했고 파일 분할을 요청했다. 이번 오류의 정확한 문구/실제 호스트 원인은 추가로 확인하지 못했다.
