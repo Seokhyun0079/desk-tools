@@ -9,29 +9,28 @@
             }
         }
 
-        function boundsOf(item) {
-            return withDocumentCoordinates(function () {
-                var b;
-                if (typeOf(item) === "Layer") {
-                    for (var i = 0; i < objectEntries.length; i++) {
-                        if (sameItem(objectEntries[i].ref, item)) {
-                            b = objectEntries[i].targetBounds;
-                            break;
-                        }
-                    }
-                    if (!b) throw new Error("表示中のオブジェクトの範囲がありません。");
-                } else {
-                    try { b = item.visibleBounds; } catch (_) { b = item.geometricBounds; }
-                }
-                return {
-                    left: b[0],
-                    top: b[1],
-                    right: b[2],
-                    bottom: b[3],
-                    width: Math.abs(b[2] - b[0]),
-                    height: Math.abs(b[1] - b[3])
-                };
-            });
+        function artworkBounds(item) {
+            var props = ["visibleBounds", "geometricBounds"];
+            for (var i = 0; i < props.length; i++) {
+                try {
+                    var b = item[props[i]];
+                    if (!b || b.length !== 4) continue;
+                    var result = [];
+                    for (var k = 0; k < 4 && typeof b[k] === "number" && isFinite(b[k]); k++) result.push(b[k]);
+                    if (result.length === 4) return result;
+                } catch (_) {}
+            }
+            throw new Error("オブジェクトの範囲を取得できません。");
+        }
+
+        function boundsOf(entry) {
+            var b = entry.itemType === "Layer" ? entry.targetBounds :
+                withDocumentCoordinates(function () { return artworkBounds(entry.ref); });
+            if (!b) throw new Error("表示中のオブジェクトの範囲がありません。");
+            return {
+                left: b[0], top: b[1], right: b[2], bottom: b[3],
+                width: Math.abs(b[2] - b[0]), height: Math.abs(b[1] - b[3])
+            };
         }
 
         // Layers have no bounds of their own. The UI uses its loaded model;
@@ -97,52 +96,53 @@
                 }
                 return false;
             }
-            function walk(node) {
+            function intersect(a, clip) {
+                if (!a || !clip) return a;
+                var r = [Math.max(a[0], clip[0]), Math.min(a[1], clip[1]),
+                    Math.min(a[2], clip[2]), Math.max(a[3], clip[3])];
+                return r[0] < r[2] && r[3] < r[1] ? r : null;
+            }
+            function walk(node, clip) {
                 var ref = refOf(node), t = nodeType(node);
                 if (hidden(ref, t)) return null;
-                if (t === "Layer" || t === "GroupItem") {
-                    var kids = childrenOf(node), result = null, clip = null, clipped = false;
-                    var unreadableBefore = unreadableBounds;
-                    try { clipped = t === "GroupItem" && ref.clipped; } catch (_) {}
-                    for (var i = 0; i < kids.length; i++) {
-                        if (clipped && clipping(kids[i])) {
-                            try { clip = rectOf(refOf(kids[i]), true); }
-                            catch (_) {
-                                var maskError = new Error("クリッピング範囲を取得できません。");
-                                maskError.clippingBounds = true;
-                                throw maskError;
-                            }
-                        } else {
-                            try { result = union(result, walk(kids[i])); }
-                            catch (childError) {
-                                if (childError.clippingBounds) throw childError;
-                                unreadableBounds++;
-                            }
-                        }
-                    }
-                    if (t === "GroupItem" && !clipped && (unreadableBounds > unreadableBefore || !kids.length)) {
-                        // Prefer a readable container bound to silently omitting
-                        // an unreadable child. Report this approximation explicitly.
-                        try {
-                            result = rectOf(ref, false);
-                            unreadableBounds = unreadableBefore;
-                            fallbackGroups++;
-                        } catch (_) {}
-                    }
-                    if (clipped && result) {
-                        if (!clip) {
-                            var missingMask = new Error("クリッピング範囲を取得できません。");
-                            missingMask.clippingBounds = true;
-                            throw missingMask;
-                        }
-                        result = [Math.max(result[0], clip[0]), Math.min(result[1], clip[1]),
-                            Math.min(result[2], clip[2]), Math.max(result[3], clip[3])];
-                        if (result[0] > result[2] || result[3] > result[1]) return null;
-                    }
-                    return result;
+                if (t !== "Layer" && t !== "GroupItem") {
+                    try { if (t === "PathItem" && ref.guides) return null; } catch (_) {}
+                    return intersect(rectOf(ref, false), clip);
                 }
-                try { if (t === "PathItem" && ref.guides) return null; } catch (_) {}
-                return rectOf(ref, false);
+                var kids = childrenOf(node), result = null, maskIndex = -1, clipped = false;
+                var i, unreadableBefore = unreadableBounds;
+                try { clipped = t === "GroupItem" && ref.clipped; } catch (_) {}
+                if (clipped) {
+                    // Apply every ancestor mask to each leaf before unioning disjoint art.
+                    for (i = 0; i < kids.length; i++) {
+                        if (clipping(kids[i])) { maskIndex = i; break; }
+                    }
+                    try {
+                        if (maskIndex < 0) throw new Error();
+                        clip = intersect(rectOf(refOf(kids[maskIndex]), true), clip);
+                    } catch (_) {
+                        var maskError = new Error("クリッピング範囲を取得できません。");
+                        maskError.clippingBounds = true;
+                        throw maskError;
+                    }
+                    if (!clip) return null;
+                }
+                for (i = 0; i < kids.length; i++) {
+                    if (i === maskIndex) continue;
+                    try { result = union(result, walk(kids[i], clip)); }
+                    catch (childError) {
+                        if (childError.clippingBounds) throw childError;
+                        unreadableBounds++;
+                    }
+                }
+                if (t === "GroupItem" && !clipped && (unreadableBounds > unreadableBefore || !kids.length)) {
+                    try {
+                        result = intersect(rectOf(ref, false), clip);
+                        unreadableBounds = unreadableBefore;
+                        fallbackGroups++;
+                    } catch (_) {}
+                }
+                return result;
             }
             var ancestor = refOf(root), ancestorType = nodeType(root);
             if (useModel) root.visibilityUnknown = 0;
@@ -177,18 +177,6 @@
             } catch (_) { return null; }
         }
 
-        function readableLayerDocument() {
-            // Match the loader's existing document-handle recovery. A callback
-            // can expose a transient wrapper whose layers property is unreadable.
-            for (var attempt = 0; attempt < 2; attempt++) {
-                try {
-                    var current = app.activeDocument;
-                    if (current.layers.length > 0) return current;
-                } catch (_) {}
-            }
-            throw new Error("ドキュメントのレイヤーを取得できません。");
-        }
-
         function layerTargetKey(entry) {
             if (!entry.layerPath || !entry.layerPath.length) throw new Error("レイヤーを特定できません。再実行してください。");
             return "{t:\"Layer\",p:[" + entry.layerPath.join(",") + "],n:" +
@@ -200,15 +188,16 @@
                 pushUnique.toString() + ";" + parentOf.toString() + ";" + isDirectChild.toString() + ";" +
                 addCollectionItems.toString() + ";" + addTypedChildren.toString() + ";" +
                 sortByStack.toString() + ";" + artItemCount.toString() + ";" + directChildren.toString() + ";" +
-                layerArtworkBounds.toString() + ";" + findLayerTarget.toString() + ";" + readableLayerDocument.toString() + ";";
+                layerArtworkBounds.toString() + ";";
         }
 
         function requestLayerCanvasFollow(entry) {
             try {
                 var key = layerTargetKey(entry), zoom = currentZoom();
-                var code = "(function(){" + hostLoggerSource() + layerBoundsHostSource() +
-                    "if(!app.documents.length)return '';var old=app.coordinateSystem;try{" +
-                    "var d=readableLayerDocument(),l=findLayerTarget(d," + key + ");if(!l)return '';" +
+                var code = "(function(){" + hostLoggerSource() + guardedDocumentSource() +
+                    findLayerTarget.toString() + ";" + layerBoundsHostSource() +
+                    "if(!doc)return '';var old=app.coordinateSystem;try{" +
+                    "var d=doc,l=findLayerTarget(d," + key + ");if(!l)return '';" +
                     "app.coordinateSystem=CoordinateSystem.DOCUMENTCOORDINATESYSTEM;" +
                     "var state={},b=layerArtworkBounds(l,false,state);if(!b)return '';" +
                     "var v=d.views[0];try{if(d.activeView)v=d.activeView;}catch(e0){}" +
@@ -228,7 +217,7 @@
                     }
                     entry.targetBounds = b;
                     if (activeLayerEntry === entry && picked[entry.id]) {
-                        updateCountAndInfo(entry.ref);
+                        updateCountAndInfo(entry);
                         if (fields[1] === "1") statusText.text = "レイヤー範囲を取得しました（不確かな表示状態または代替範囲を含む）。";
                     }
                 });

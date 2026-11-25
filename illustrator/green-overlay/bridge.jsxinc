@@ -7,8 +7,66 @@
             return null;
         }
 
-        function zOrderOf(item) {
-            try { return item.absoluteZOrderPosition; } catch (_) { return null; }
+        function documentKey(document) {
+            try {
+                var file = document.fullName;
+                var path = file && (file.absoluteURI || file.fsName);
+                if (path) return "file:" + path;
+            } catch (_) {}
+            try {
+                if (document.name) return "name:" + document.name;
+            } catch (_) {}
+            return null;
+        }
+
+        function uniqueOpenDocument(key) {
+            var docs = app.documents;
+            if (docs.length === 1) return true;
+            var matches = 0;
+            for (var i = 0; i < docs.length; i++) {
+                var otherKey = documentKey(docs[i]);
+                if (!otherKey) return false;
+                if (otherKey === key) matches++;
+            }
+            return matches === 1;
+        }
+
+        function activeOriginalDocument(key) {
+            if (!key) return null;
+            // The host can briefly return an unreadable wrapper for an open document.
+            for (var attempt = 0; attempt < 3; attempt++) {
+                try {
+                    var current = app.activeDocument;
+                    if (!current.layers.length) continue;
+                    var actual = documentKey(current);
+                    if (!actual) continue;
+                    if (actual !== key) return null;
+                    return uniqueOpenDocument(key) ? current : null;
+                } catch (_) {}
+            }
+            return null;
+        }
+
+        function guardedDocumentSource() {
+            var unique = false;
+            try { unique = originalDocumentKey && uniqueOpenDocument(originalDocumentKey); } catch (_) {}
+            var key = !unique ? "null" : '"' + jsString(originalDocumentKey) + '"';
+            return documentKey.toString() + ";" + uniqueOpenDocument.toString() + ";" + activeOriginalDocument.toString() +
+                ";var doc=activeOriginalDocument(" + key + ");";
+        }
+
+        // A palette callback may temporarily lack a readable activeDocument.
+        // Keep model selection usable; only touch native selection on a confirmed match.
+        function paletteDocumentState() {
+            try {
+                var active = app.activeDocument;
+                if (active == doc) return 1;
+                var key = documentKey(active);
+                if (!key) return 0;
+                if (key === originalDocumentKey && uniqueOpenDocument(key)) return 1;
+            } catch (_) { return 0; }
+            statusText.text = "元のドキュメントに戻るか、ツールを再実行してください。";
+            return -1;
         }
 
         function currentZoom() {
@@ -34,9 +92,8 @@
 
         function panToPointScript(x, y, zoom) {
             return (
-                "(function(){" +
-                "if(!app.documents.length)return;" +
-                "var doc=app.activeDocument;" +
+                "(function(){" + guardedDocumentSource() +
+                "if(!doc)return;" +
                 "var v=doc.views[0];" +
                 "try{if(doc.activeView)v=doc.activeView;}catch(e0){}" +
                 "var p=[" + jsNumber(x) + "," + jsNumber(y) + "];" +
@@ -53,7 +110,7 @@
                 return;
             }
             try {
-                var b = boundsOf(entry.ref);
+                var b = boundsOf(entry);
                 sendBridgeTalk(
                     panToPointScript(
                         (b.left + b.right) / 2,

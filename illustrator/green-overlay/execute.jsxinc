@@ -1,184 +1,197 @@
 ﻿// Green Overlay: execute (included by green-overlay.jsx)
         function jsString(s) {
-            return String(s)
-                .replace(/\\/g, "\\\\")
-                .replace(/"/g, '\\"')
-                .replace(/\r/g, "\\r")
-                .replace(/\n/g, "\\n");
-        }
-
-        function syncIllustratorSelectionFromPicked() {
-            var i, entry;
-            try { doc.selection = null; } catch (_) {}
-
-            for (i = 0; i < objectEntries.length; i++) {
-                entry = objectEntries[i];
-                if (!entry.selectable || !picked[entry.id]) continue;
-                try { entry.ref.selected = true; } catch (e) { logEvent("selection.sync", e, entry.ref); }
-            }
-        }
-
-        function collectPickedKeys() {
-            var keys = [];
-            var i, entry;
-            for (i = 0; i < objectEntries.length; i++) {
-                entry = objectEntries[i];
-                if (!picked[entry.id]) continue;
-                if (entry.itemType === "Layer") {
-                    keys.push(layerTargetKey(entry));
-                    continue;
-                }
-                if (!entry.selectable) continue;
-                if (entry.zOrder === null || entry.zOrder === undefined) continue;
-                keys.push(
-                    "{z:" + jsNumber(entry.zOrder) +
-                    ",t:\"" + jsString(entry.itemType) + "\"}"
-                );
-            }
-            return keys;
+            return String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')
+                .replace(/\r/g, "\\r").replace(/\n/g, "\\n")
+                .replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
         }
 
         function hostLoggerSource() {
             return 'var logFile=new File("' + jsString(logFile.fsName) + '");' + logEvent.toString() + ';';
         }
 
-        function buildExecuteScript(destInfo, settings) {
-            var keys = collectPickedKeys();
-            var destType, destName, destZ;
-            var layerCode = "";
-            for (var k = 0; k < keys.length; k++) {
-                if (keys[k].indexOf('{t:"Layer",') === 0) { layerCode = layerBoundsHostSource(); break; }
+        function supportsUuidLookup() {
+            try { return !!doc.getPageItemFromUuid; } catch (_) { return false; }
+        }
+
+        function uuidKey(uuid) { return '{u:"' + jsString(uuid) + '"}'; }
+
+        // On older hosts the selected native reference is authoritative. Capture
+        // its rectangle at confirmation, never infer identity from stacking order.
+        function collectPickedKeys(canLookup) {
+            var keys = [], pending = [], hasLayers = false;
+            for (var i = 0; i < objectEntries.length; i++) {
+                var entry = objectEntries[i];
+                if (!picked[entry.id]) continue;
+                var index = keys.length;
+                keys.push("{}"); // An unreadable target must still count as a failure.
+                if (entry.itemType === "Layer") {
+                    hasLayers = true;
+                    try { keys[index] = layerTargetKey(entry); } catch (e) { logEvent("execute.capture", e); }
+                } else if (canLookup && entry.uuid) {
+                    keys[index] = uuidKey(entry.uuid);
+                } else {
+                    pending.push({index: index, ref: entry.ref});
+                }
             }
-
-            if (keys.length === 0) {
-                return "alert('対象オブジェクトを特定できません。');";
+            if (pending.length) {
+                try {
+                    withDocumentCoordinates(function () {
+                        for (var j = 0; j < pending.length; j++) {
+                            var target = pending[j];
+                            try { keys[target.index] = "{b:[" + artworkBounds(target.ref).join(",") + "]}"; }
+                            catch (e) { logEvent("execute.capture", e); }
+                        }
+                    });
+                } catch (e) { logEvent("execute.coordinates", e); }
             }
+            return {keys: keys, hasLayers: hasLayers};
+        }
 
-            destType = destInfo.type || "Layer";
-            destName = jsString(destInfo.name || "");
-            destZ = destInfo.z === null || destInfo.z === undefined
-                ? "null"
-                : jsNumber(destInfo.z);
+        function groupStep(entry) {
+            var parent = entry.parentEntry.ref, props = ["groupItems", "pageItems"];
+            for (var p = 0; p < props.length; p++) {
+                try {
+                    var items = parent[props[p]], count = items.length;
+                    for (var i = 0; i < count; i++) {
+                        var item = items[i];
+                        if (item != entry.ref && !(entry.uuid && artworkUuid(item) === entry.uuid)) continue;
+                        return '{c:"' + props[p] + '",i:' + i + ',n:"' + jsString(item.name || "") +
+                            '",u:"' + jsString(entry.uuid || "") + '"}';
+                    }
+                } catch (_) {}
+            }
+            throw new Error("作成先のグループを特定できません。ツールを再実行してください。");
+        }
 
-            return (
-                "(function(){" + hostLoggerSource() + layerCode +
-                "if(!app.documents.length){logEvent('execute.document','No document');alert('ドキュメントが開かれていません。');return;}" +
-                "var doc=app.activeDocument;" +
-                (layerCode ? "try{doc=readableLayerDocument();}catch(docError){logEvent('execute.document',docError);alert(String(docError));return;}" : "") +
-                "var oldcs=app.coordinateSystem;" +
-                "app.coordinateSystem=CoordinateSystem.DOCUMENTCOORDINATESYSTEM;" +
-                "function walkLayers(parent,z,name){" +
-                "var i,lyr,found;" +
-                "if(!parent.layers)return null;" +
-                "for(i=0;i<parent.layers.length;i++){" +
-                "lyr=parent.layers[i];" +
-                "try{if(z!==null&&lyr.absoluteZOrderPosition==z)return lyr;}catch(e0){}" +
-                "try{if(name!==''&&lyr.name==name)return lyr;}catch(e1){}" +
-                "found=walkLayers(lyr,z,name);if(found)return found;" +
-                "}" +
-                "return null;" +
-                "}" +
-                "function findDest(){" +
-                "var wantType='" + destType + "';" +
-                "var wantZ=" + destZ + ";" +
-                "var wantName=\"" + destName + "\";" +
-                "var i,g;" +
-                "if(wantType=='Layer'){" +
-                "var L=walkLayers(doc,wantZ,wantName);if(L)return L;" +
-                "}" +
-                "if(wantType=='GroupItem'){" +
-                "try{" +
-                "for(i=0;i<doc.groupItems.length;i++){" +
-                "g=doc.groupItems[i];" +
-                "try{if(wantZ!==null&&g.absoluteZOrderPosition==wantZ)return g;}catch(e2){}" +
-                "}" +
-                "}catch(e3){}" +
-                "}" +
-                "return doc.activeLayer;" +
-                "}" +
-                "function keyOf(z,t){return t+'#'+z;}" +
-                "function collectSources(keys){" +
-                "var wanted={},found={},result=[],i,item,k,hasArt=false;" +
-                "for(i=0;i<keys.length;i++){if(keys[i].t!='Layer'){wanted[keyOf(keys[i].z,keys[i].t)]=true;hasArt=true;}}" +
-                "if(!hasArt){for(i=0;i<keys.length;i++)result.push(null);return result;}" +
-                "try{" +
-                "for(i=0;i<doc.pageItems.length;i++){" +
-                "item=doc.pageItems[i];" +
-                "try{k=keyOf(item.absoluteZOrderPosition,item.typename);}catch(e4){continue;}" +
-                "if(wanted[k]&&!found[k])found[k]=item;" +
-                "}" +
-                "}catch(e5){logEvent('sources.pageItems',e5);}" +
-                "try{" +
-                "for(i=0;i<doc.pathItems.length;i++){" +
-                "item=doc.pathItems[i];" +
-                "try{k=keyOf(item.absoluteZOrderPosition,item.typename);}catch(e6){continue;}" +
-                "if(wanted[k]&&!found[k])found[k]=item;" +
-                "}" +
-                "}catch(e7){logEvent('sources.pathItems',e7);}" +
-                "for(i=0;i<keys.length;i++){" +
-                "k=keyOf(keys[i].z,keys[i].t);" +
-                "result.push(found[k]||null);" +
-                "}" +
-                "return result;" +
-                "}" +
-                "var dest=findDest();" +
-                "var keys=[" + keys.join(",") + "];" +
-                "var sources=collectSources(keys);" +
-                "var layerRects=[],layerErrors=[],layerWarnings=[];" +
-                "for(var li=0;li<keys.length;li++){" +
-                "if(keys[li].t!='Layer')continue;" +
-                "try{var sourceLayer=findLayerTarget(doc,keys[li]);" +
-                "if(!sourceLayer){layerErrors[li]='レイヤーを特定できません。再読み込みしてください。';continue;}" +
-                "var boundsState={};layerRects[li]=layerArtworkBounds(sourceLayer,false,boundsState);" +
-                "layerWarnings[li]=boundsState.unknownVisibility||boundsState.fallbackGroups;" +
-                "}catch(layerError){layerErrors[li]=String(layerError);logEvent('execute.layerBounds',layerError);}" +
-                "}" +
-                "var selectionFallback=[];" +
-                "try{for(var si=0;si<doc.selection.length;si++)selectionFallback.push(doc.selection[si]);}catch(eSel){}" +
-                "var color=new RGBColor();" +
-                "color.red=" + settings.r + ";color.green=" + settings.g + ";color.blue=" + settings.b + ";" +
-                "var overlayOpacity=" + settings.opacity + ";" +
-                "var made=[],failed=0,lastError='',fallbackIndex=0,uncertainLayers=0;" +
-                "var i,src,b,w,h,top,left,rect;" +
-                "for(i=0;i<sources.length;i++){" +
-                "try{" +
-                "src=null;" +
-                "if(keys[i].t=='Layer'){" +
-                "b=layerRects[i];" +
-                "if(!b){failed++;lastError=layerErrors[i]||'レイヤーに表示中の範囲がありません';logEvent('execute.layerBounds',lastError);continue;}" +
-                "if(layerWarnings[i])uncertainLayers++;" +
-                "}else{" +
-                "src=sources[i];" +
-                "if(!src&&fallbackIndex<selectionFallback.length){src=selectionFallback[fallbackIndex++];}" +
-                "if(!src){failed++;lastError='対象が見つかりません';logEvent('execute.source',lastError);continue;}" +
-                "try{b=src.visibleBounds;}catch(e8){b=src.geometricBounds;}" +
-                "}" +
-                "w=Math.abs(b[2]-b[0]);h=Math.abs(b[1]-b[3]);" +
-                "if(w<=0||h<=0){failed++;logEvent('execute.bounds','Non-positive bounds',src);continue;}" +
-                "top=b[1]>b[3]?b[1]:b[3];left=b[0]<b[2]?b[0]:b[2];" +
-                "rect=null;" +
-                "try{rect=dest.pathItems.rectangle(top,left,w,h);}" +
-                "catch(e10){" +
-                "rect=doc.pathItems.rectangle(top,left,w,h);" +
-                "try{rect.move(dest,ElementPlacement.PLACEATBEGINNING);}catch(e11){logEvent('execute.move',e11);}" +
-                "}" +
-                "rect.stroked=false;rect.filled=true;" +
-                "try{rect.fillColor=color;}catch(e12){logEvent('execute.color',e12);}" +
-                "try{rect.opacity=overlayOpacity;}catch(eOpacity){logEvent('execute.opacity',eOpacity);}" +
-                "rect.name='オーバーレイ';" +
-                "try{rect.zOrder(ZOrderMethod.BRINGTOFRONT);}catch(eZ){logEvent('execute.zOrder',eZ);}" +
-                "made.push(rect);" +
-                "}catch(e13){failed++;lastError=String(e13);logEvent('execute.create',e13,src);}" +
-                "}" +
-                "try{app.coordinateSystem=oldcs;}catch(e14){logEvent('execute.coordinates',e14);}" +
-                "try{doc.selection=made;}catch(e15){logEvent('execute.selection',e15);}" +
-                "try{app.redraw();}catch(e16){logEvent('execute.redraw',e16);}" +
-                "logEvent('execute.complete','made='+made.length+' failed='+failed);" +
-                "if(failed>0){" +
-                "alert(made.length+'件を作成しました。\\n'+failed+'件は作成できませんでした。'+(lastError?'\\n\\n'+lastError:''));" +
-                "}else{" +
-                "alert(made.length+'件を作成しました。'+(uncertainLayers?'\\n注: '+uncertainLayers+'件は表示状態不明またはグループ範囲の代替を含みます。':''));" +
-                "}" +
-                "})();"
-            );
+        function destinationKey(entry, canLookup) {
+            if (entry.itemType === "GroupItem" && canLookup && entry.uuid) return uuidKey(entry.uuid);
+            var groups = [];
+            while (entry && entry.itemType === "GroupItem") {
+                groups.unshift(groupStep(entry));
+                entry = entry.parentEntry;
+            }
+            if (!entry || entry.itemType !== "Layer") throw new Error("作成先を特定できません。");
+            return "{layer:" + layerTargetKey(entry) + ",groups:[" + groups.join(",") + "]}";
+        }
+
+        function itemByUuid(document, uuid) {
+            try {
+                var item = document.getPageItemFromUuid(uuid);
+                if (artworkUuid(item) === uuid) return item;
+            } catch (_) {}
+            return null;
+        }
+
+        function resolveDestination(document, key) {
+            if (key.u) {
+                var group = itemByUuid(document, key.u);
+                return group && group.typename === "GroupItem" ? group : null;
+            }
+            var dest = findLayerTarget(document, key.layer);
+            for (var i = 0; dest && i < key.groups.length; i++) {
+                var step = key.groups[i];
+                try {
+                    dest = dest[step.c][step.i];
+                    if (dest.typename !== "GroupItem" || String(dest.name || "") !== step.n ||
+                        (step.u && artworkUuid(dest) !== step.u)) return null;
+                } catch (_) { return null; }
+            }
+            return dest;
+        }
+
+        function createOverlays(document, destKey, keys, settings) {
+            var dest = resolveDestination(document, destKey);
+            if (!dest) {
+                alert("作成先を特定できません。ツールを再実行してください。");
+                return;
+            }
+            var previousSystem = app.coordinateSystem, made = [], failed = 0, lastError = "", uncertain = 0;
+            var reports = [], rects = [], cleanupFailures = 0;
+            function recordFailure(stage, error) {
+                failed++;
+                lastError = String(error);
+                logEvent(stage, error);
+            }
+            try {
+                app.coordinateSystem = CoordinateSystem.DOCUMENTCOORDINATESYSTEM;
+                // Resolve every source before creating art that could alter its bounds.
+                for (var i = 0; i < keys.length; i++) {
+                    var key = keys[i], b;
+                    try {
+                        if (key.t === "Layer") {
+                            var layer = findLayerTarget(document, key);
+                            if (!layer) throw new Error("レイヤーを特定できません。再読み込みしてください。");
+                            reports[i] = {};
+                            b = layerArtworkBounds(layer, false, reports[i]);
+                            if (!b) throw new Error("レイヤーに表示中の範囲がありません。");
+                        } else if (key.u) {
+                            var item = itemByUuid(document, key.u);
+                            if (!item) throw new Error("対象オブジェクトを特定できません。");
+                            b = artworkBounds(item);
+                        } else {
+                            b = key.b;
+                        }
+                        if (!b || b[0] === b[2] || b[1] === b[3]) throw new Error("対象の範囲を取得できません。");
+                        rects[i] = b;
+                    } catch (e) { recordFailure("execute.bounds", e); }
+                }
+
+                var color = new RGBColor();
+                color.red = settings.r; color.green = settings.g; color.blue = settings.b;
+                for (var j = 0; j < rects.length; j++) {
+                    var bounds = rects[j];
+                    if (!bounds) continue;
+                    var rect = null;
+                    try {
+                        var left = Math.min(bounds[0], bounds[2]), top = Math.max(bounds[1], bounds[3]);
+                        var width = Math.abs(bounds[2] - bounds[0]), height = Math.abs(bounds[1] - bounds[3]);
+                        try { rect = dest.pathItems.rectangle(top, left, width, height); }
+                        catch (_) {
+                            rect = document.pathItems.rectangle(top, left, width, height);
+                            rect.move(dest, ElementPlacement.PLACEATBEGINNING);
+                        }
+                        rect.stroked = false;
+                        rect.filled = true;
+                        rect.fillColor = color;
+                        rect.opacity = settings.opacity;
+                        rect.name = "オーバーレイ";
+                        try { rect.zOrder(ZOrderMethod.BRINGTOFRONT); } catch (zError) { logEvent("execute.zOrder", zError); }
+                        made.push(rect);
+                        if (reports[j] && (reports[j].unknownVisibility || reports[j].fallbackGroups)) uncertain++;
+                    } catch (error) {
+                        if (rect) {
+                            try { rect.remove(); }
+                            catch (cleanupError) {
+                                logEvent("execute.cleanup", cleanupError);
+                                cleanupFailures++;
+                            }
+                        }
+                        recordFailure("execute.create", error);
+                    }
+                }
+            } finally {
+                try { app.coordinateSystem = previousSystem; } catch (e) { logEvent("execute.coordinates", e); }
+            }
+            if (made.length) {
+                try { document.selection = made; } catch (e) { logEvent("execute.selection", e); }
+                try { app.redraw(); } catch (e) { logEvent("execute.redraw", e); }
+            }
+            logEvent("execute.complete", "made=" + made.length + " failed=" + failed);
+            var summary = made.length + "件を作成しました。";
+            if (failed) summary += "\n" + failed + "件は作成できませんでした。\n\n" + lastError;
+            if (cleanupFailures) summary += "\n作成途中の矩形を " + cleanupFailures + " 件削除できませんでした。";
+            if (uncertain) summary += "\n注: " + uncertain + "件は表示状態不明またはグループ範囲の代替を含みます。";
+            alert(summary);
+        }
+
+        function buildExecuteScript(destination, settings) {
+            var canLookup = supportsUuidLookup(), targets = collectPickedKeys(canLookup);
+            var dest = destinationKey(destination, canLookup);
+            var options = "{r:" + settings.r + ",g:" + settings.g + ",b:" + settings.b + ",opacity:" + settings.opacity + "}";
+            return "(function(){" + hostLoggerSource() + guardedDocumentSource() +
+                "if(!doc){alert('元のドキュメントを確認できません。元のドキュメントに戻り、再実行してください。');return;}" +
+                artworkUuid.toString() + ";" + itemByUuid.toString() + ";" + artworkBounds.toString() + ";" +
+                findLayerTarget.toString() + ";" + resolveDestination.toString() + ";" +
+                (targets.hasLayers ? layerBoundsHostSource() : "") + createOverlays.toString() + ";" +
+                "createOverlays(doc," + dest + ",[" + targets.keys.join(",") + "]," + options + ");})();";
         }

@@ -120,6 +120,14 @@
             return String(Math.round(n * 1000) / 1000);
         }
 
+        function artworkUuid(item) {
+            try {
+                var id = item.uuid;
+                if (typeof id === "string" && id) return id;
+            } catch (_) {}
+            return null;
+        }
+
         function sameItem(a, b) {
             if (!a || !b) return false;
             try { if (a === b) return true; } catch (_) {}
@@ -340,28 +348,27 @@
         }
 
         function descendantSelectionState(entry) {
-            var total = 0, selected = 0;
+            if (!entry.pickedLeaves) return 0;
+            return entry.pickedLeaves === entry.leafCount ? 2 : 1;
+        }
 
-            function walk(nodes) {
-                var i, child;
-                for (i = 0; i < nodes.length; i++) {
-                    child = nodes[i];
-                    if (child.selectable) {
-                        total++;
-                        if (picked[child.id]) selected++;
-                    } else if (!child.childrenLoaded) {
-                        // Unknown descendants must not be treated as fully selected.
-                        total++;
-                    } else if (child.children.length > 0) {
-                        walk(child.children);
-                    }
+        function setPicked(entry, value) {
+            if (!!picked[entry.id] === value) return;
+            var delta = value ? 1 : -1;
+            if (value) picked[entry.id] = true;
+            else delete picked[entry.id];
+            pickedCount += delta;
+            entry.ui.text = objectRowText(entry);
+            if (!entry.selectable) return;
+            for (var parent = entry.parentEntry; parent; parent = parent.parentEntry) {
+                var before = descendantSelectionState(parent);
+                parent.pickedLeaves += delta;
+                var after = descendantSelectionState(parent);
+                if (before !== after && parent.toggleUI) {
+                    var mark = after === 2 ? "☑ " : (after === 1 ? "◩ " : "☐ ");
+                    parent.toggleUI.text = mark + "配下を全選択 / 全解除";
                 }
             }
-
-            walk(entry.children);
-            if (total === 0 || selected === 0) return 0;
-            if (selected === total) return 2;
-            return 1;
         }
 
         function objectRowText(entry) {
@@ -376,16 +383,15 @@
                 (entry.itemType === "Layer" && picked[entry.id] ? " （対象）" : "");
         }
 
-        function setDescendantsPicked(entry, value) {
-            ensureObjectChildren(entry);
+        function setDescendantsPicked(entry, value, syncSelection) {
             var i, child;
             for (i = 0; i < entry.children.length; i++) {
                 child = entry.children[i];
                 if (child.selectable) {
-                    picked[child.id] = value;
-                    try { child.ref.selected = value; } catch (e) { logEvent("selection.descendants", e, child.ref); }
-                } else if (isStructuralContainer(child.ref)) {
-                    setDescendantsPicked(child, value);
+                    setPicked(child, value);
+                    if (syncSelection) applyIllustratorSelection(child);
+                } else if (child.children.length) {
+                    setDescendantsPicked(child, value, syncSelection);
                 }
             }
         }

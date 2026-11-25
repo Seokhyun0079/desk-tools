@@ -18,13 +18,12 @@
         }
 
         layerTargetButton.onClick = function () {
-            if (loading || !activeLayerEntry) return;
+            if (loading || !activeLayerEntry || paletteDocumentState() < 0) return;
             var entry = activeLayerEntry;
             try {
                 var turnOn = !picked[entry.id];
-                picked[entry.id] = turnOn;
-                refreshVisibleObjectRows();
-                updateCountAndInfo(entry.ref);
+                setPicked(entry, turnOn);
+                updateCountAndInfo(entry);
                 if (turnOn) requestCanvasFollow(entry);
                 statusText.text = turnOn
                     ? "レイヤーを対象にしました。範囲は実行時に取得します。"
@@ -61,11 +60,15 @@
                         "\n「レイヤー全体を対象にする」で範囲全体を選択できます。";
                 }
 
+                var documentState = (entry.descendantToggle || entry.selectable) ? paletteDocumentState() : 0;
+                if (documentState < 0) {
+                    inObjectListHandler = false;
+                    return;
+                }
                 if (entry.descendantToggle) {
                     var parentEntry = entry.parentEntry;
                     var turnOn = descendantSelectionState(parentEntry) !== 2;
-                    setDescendantsPicked(parentEntry, turnOn);
-                    refreshVisibleObjectRows();
+                    setDescendantsPicked(parentEntry, turnOn, documentState > 0);
                     updateCountAndInfo(null);
                     statusText.text = turnOn
                         ? "配下をすべて選択しました。"
@@ -78,10 +81,9 @@
                 }
 
                 if (entry.selectable) {
-                    picked[entry.id] = !picked[entry.id];
-                    refreshVisibleObjectRows();
-                    updateCountAndInfo(entry.ref);
-                    try { applyIllustratorSelection(entry); } catch (_) {}
+                    setPicked(entry, !picked[entry.id]);
+                    updateCountAndInfo(entry);
+                    if (documentState > 0) applyIllustratorSelection(entry);
                     if (picked[entry.id]) requestCanvasFollow(entry);
                     suppressObjectEvent++;
                     try { objectList.selection = null; } catch (_) {}
@@ -103,25 +105,15 @@
 
         selectAllButton.onClick = function () {
             try {
-                loadAllTargets(objectRoots);
-                var i, entry;
-
-                for (i = 0; i < objectEntries.length; i++) {
-                    entry = objectEntries[i];
+                var documentState = paletteDocumentState();
+                if (documentState < 0) return;
+                for (var i = 0; i < objectEntries.length; i++) {
+                    var entry = objectEntries[i];
                     if (entry.selectable) {
-                        picked[entry.id] = true;
+                        setPicked(entry, true);
+                        if (documentState > 0) applyIllustratorSelection(entry);
                     }
                 }
-
-                refreshVisibleObjectRows();
-                try {
-                    for (i = 0; i < objectEntries.length; i++) {
-                        entry = objectEntries[i];
-                        if (entry.selectable) {
-                            try { entry.ref.selected = true; } catch (e) { logEvent("selection.all", e, entry.ref); }
-                        }
-                    }
-                } catch (_) {}
                 updateCountAndInfo(null);
                 statusText.text = "すべて選択しました。";
             } catch (e) {
@@ -131,10 +123,11 @@
 
         clearButton.onClick = function () {
             try {
-                picked = {};
-                refreshVisibleObjectRows();
+                var documentState = paletteDocumentState();
+                if (documentState < 0) return;
+                for (var i = 0; i < objectEntries.length; i++) setPicked(objectEntries[i], false);
                 updateLayerTargetButton();
-                try { doc.selection = null; } catch (_) {}
+                if (documentState > 0) { try { doc.selection = null; } catch (_) {} }
                 updateCountAndInfo(null);
                 statusText.text = "すべて解除しました。";
             } catch (e) {
@@ -144,22 +137,22 @@
 
         runButton.onClick = function () {
             try {
+                if (paletteDocumentState() < 0) return;
                 var destinationNode = destinationTree.selection;
                 if (destinationNode === null) {
                     alert("作成先を選択してください。");
                     return;
                 }
 
-                var destinationIndex = destinationNode._destinationIndex;
-                var destInfo = destinationRefs[destinationIndex];
+                var destination = destinationNode._entry;
 
-                if (!destInfo || !destInfo.ref) {
+                if (!destination || !destination.ref) {
                     alert("作成先を取得できません。");
                     return;
                 }
 
                 try {
-                    if (destInfo.ref.locked) {
+                    if (destination.ref.locked) {
                         alert("作成先がロックされています。");
                         return;
                     }
@@ -171,7 +164,7 @@
                     return;
                 }
 
-                var count = selectedCount();
+                var count = pickedCount;
                 if (!count) {
                     alert("対象オブジェクトを選択してください。");
                     return;
@@ -187,9 +180,9 @@
                     return;
                 }
 
-                syncIllustratorSelectionFromPicked();
-                sendBridgeTalk(buildExecuteScript(destInfo, settings));
-                statusText.text = "作成を実行しました。";
+                if (paletteDocumentState() < 0) return;
+                sendBridgeTalk(buildExecuteScript(destination, settings));
+                statusText.text = "作成を要求しました。";
             } catch (e) {
                 showError(e);
             }
@@ -203,6 +196,7 @@
             try {
                 loading = false;
                 $.global.__greenOverlayDiagnostic = null;
+                $.global.__greenOverlayDiagnosticOwner = null;
                 $.global.__greenOverlayWindow = null;
                 try { w.hide(); } catch (_) {}
                 try { w.close(); } catch (_) {}

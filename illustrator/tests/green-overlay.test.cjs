@@ -18,7 +18,7 @@ for (const leaf of leaves) Object.defineProperty(leaf,'visibleBounds',{get(){bou
 const nested=container('GroupItem',leaves);
 const group=container('GroupItem',[nested]);
 const layer=container('Layer',[group]);
-const doc={typename:'Document',layers:[layer],views:[{zoom:1}],pageItems:leaves,pathItems:leaves,activeLayer:layer,selection:[]};
+const doc={typename:'Document',name:'trees.ai',layers:[layer],views:[{zoom:1}],pageItems:leaves,pathItems:leaves,activeLayer:layer,selection:[]};
 doc.pathItems.rectangle = () => { throw Error('locked destination'); };
 const controls=[], logs=[], alerts=[], bodies=[], pending=[], messages=[];
 function control(type,text) {
@@ -78,8 +78,7 @@ edits[0].text='12';edits[1].text='34';edits[2].text='56';edits[3].text='78';
 tree.selection=tree.items[0];tree.onChange();
 controls.find(c=>c.text==='確認 / 実行').onClick();
 const execute=bodies.at(-1);
-assert(execute.includes('color.red=12;color.green=34;color.blue=56;'));
-assert(execute.includes('overlayOpacity=78'));
+assert(execute.includes('{r:12,g:34,b:56,opacity:78}'));
 new vm.Script(execute); // validate serialized BridgeTalk code
 vm.runInNewContext(execute,context);
 assert(logs.some(line=>line.includes('execute.create')&&line.includes('locked destination')),'host failures persist');
@@ -274,7 +273,7 @@ rootLayer.pathItems={rectangle(top,left,width,height){
     rect.args=[top,left,width,height];rect.parent=rootLayer;rect.zOrder=()=>{};rect.move=()=>{};
     rootKids.push(rect);created.push(rect);return rect;
 }};
-const layerDoc={typename:'Document',layers:[rootLayer],views:[{zoom:2}],
+const layerDoc={typename:'Document',name:'layers.ai',layers:[rootLayer],views:[{zoom:2}],
     pageItems:[mainPath,lockedPath,hiddenPath,guide,clipped,mask,outside,subPath],pathItems:[],
     activeLayer:rootLayer,selection:[]};
 rootLayer.parent=layerDoc;
@@ -540,3 +539,241 @@ assert.equal(liveDocumentHits,3);
 assert.equal(freshCreated.length,2);
 assert.deepEqual(freshCreated[1].args,[60,20,60,50]);
 console.log('Passed: layer execution recovers a transient unreadable active-document wrapper');
+
+function testLayer(name, items, layers = []) {
+    const result = withKids(art('Layer', name, {layers}), items);
+    for (const child of layers) child.parent = result;
+    return result;
+}
+
+function testDocument(name, layers, items = []) {
+    const result = {typename: 'Document', name, layers, views: [{zoom: 1}],
+        activeLayer: layers[0], selection: [], pageItems: items, pathItems: []};
+    for (const ref of layers) ref.parent = result;
+    return result;
+}
+
+function recordRectangles(container) {
+    const rectangles = [];
+    container.pathItems = container.pathItems || [];
+    container.pathItems.rectangle = (top, left, width, height) => {
+        const rect = {top, left, width, height, parent: container,
+            move(parent) { this.parent = parent; }, zOrder() {},
+            remove() { rectangles.splice(rectangles.indexOf(this), 1); }};
+        rectangles.push(rect);
+        return rect;
+    };
+    return rectangles;
+}
+
+function creationRequest(tool, destination = tool.destination.items[0]) {
+    tool.destination.selection = destination;
+    tool.destination.onChange();
+    const button = tool.own.find(c => c.text === '確認 / 実行');
+    assert(button.enabled);
+    const before = messages.length;
+    button.onClick();
+    assert.equal(messages.length, before + 1, 'one request per confirmation');
+    return messages.at(-1).body;
+}
+
+function deliver(tool, body) {
+    // BridgeTalk runs independently of the palette and its $.global variables.
+    return vm.runInNewContext(body, {...tool.ctx, $: {global: {}}});
+}
+
+{
+    const a = bounded('A', [0, 30, 10, 0]);
+    const b = art('MeshItem', 'B', {visibleBounds: [100, 40, 150, 5]});
+    const image = art('PlacedItem', 'image', {uuid: 'image-uuid', geometricBounds: [200, 50, 220, 5]});
+    delete image.absoluteZOrderPosition;
+    const inner = testLayer('output', [a]);
+    inner.meshItems = [b]; inner.placedItems = [image]; b.parent = image.parent = inner;
+    const outer = testLayer('output', [], [inner]);
+    const document = testDocument('targets.ai', [outer], [a]);
+    const outerRects = recordRectangles(outer), innerRects = recordRectangles(inner);
+    const tool = runLayerTool(document);
+    const innerRow = rowFor(tool.targets.items[0], inner);
+    for (const target of [a, b, image]) tool.click(rowFor(innerRow, target));
+    // The old stack position and host selection both point at the wrong artwork.
+    [a.absoluteZOrderPosition, b.absoluteZOrderPosition] = [b.absoluteZOrderPosition, a.absoluteZOrderPosition];
+    const request = creationRequest(tool, tool.destination.items[0].items[0]);
+    document.selection = [a, a, a];
+    deliver(tool, request);
+    assert.equal(outerRects.length, 0);
+    assert.deepEqual(innerRects.map(r => r.left).sort((x, y) => x - y), [0, 100, 200]);
+    assert.equal(alerts.at(-1), '3件を作成しました。');
+    inner.name = 'renamed';
+    deliver(tool, request);
+    assert.equal(innerRects.length, 3);
+    assert.equal(outerRects.length, 0);
+    assert.match(alerts.at(-1), /作成先を特定できません/);
+}
+console.log('Passed: exact same-name destination, typed-only artwork, missing stack index and legacy bounds');
+
+{
+    const subject = bounded('source', [0, 10, 20, 0], {uuid: 'stable'});
+    const other = bounded('other', [90, 30, 120, 5], {uuid: 'other'});
+    const layer = testLayer('output', [subject, other]);
+    const document = testDocument('uuid.ai', [layer], [subject, other]);
+    const records = recordRectangles(layer);
+    const live = new Map([['stable', subject], ['other', other]]);
+    document.getPageItemFromUuid = id => live.get(id);
+    const tool = runLayerTool(document);
+    tool.click(rowFor(tool.targets.items[0], subject));
+    const request = creationRequest(tool);
+    [subject.absoluteZOrderPosition, other.absoluteZOrderPosition] = [other.absoluteZOrderPosition, subject.absoluteZOrderPosition];
+    subject.visibleBounds = [15, 20, 35, 0];
+    document.selection = [other];
+    deliver(tool, request);
+    assert.deepEqual(records.map(r => r.left), [15], 'resolve the UUID and live geometry at delivery');
+    tool.click(rowFor(tool.targets.items[0], other));
+    const mixedRequest = creationRequest(tool);
+    live.delete('stable');
+    deliver(tool, mixedRequest);
+    assert.deepEqual(records.map(r => r.left), [15, 90]);
+    assert.match(alerts.at(-1), /1件を作成しました。[\s\S]*1件は作成できません/);
+}
+console.log('Passed: reorder, deletion and accurate partial-success counts for UUID targets');
+
+{
+    const a = bounded('subject', [0, 10, 10, 0]);
+    const g1 = withKids(art('GroupItem', 'group'), []);
+    const g2 = withKids(art('GroupItem', 'group'), []);
+    const nestedGroup = withKids(art('GroupItem', 'parent'), [g1, g2]);
+    const layer = testLayer('root', [a, nestedGroup]);
+    const document = testDocument('groups.ai', [layer], [a]);
+    const wrong = recordRectangles(g1), right = recordRectangles(g2);
+    const temporary = recordRectangles(document);
+    const tool = runLayerTool(document);
+    tool.click(rowFor(tool.targets.items[0], a));
+    const dest = tool.destination.items[0].items[0].items.find(n => n._entry.ref === g2);
+    const request = creationRequest(tool, dest);
+    deliver(tool, request);
+    assert.equal(right.length, 1);
+    assert.equal(wrong.length, 0);
+    g2.pathItems.rectangle = () => { throw Error('direct insertion unavailable'); };
+    deliver(tool, request);
+    assert.equal(temporary.length, 1);
+    assert.equal(temporary[0].parent, g2, 'document-level fallback must move into the requested group');
+    const create = document.pathItems.rectangle;
+    document.pathItems.rectangle = (...args) => {
+        const rect = create(...args);
+        rect.move = () => { throw Error('move failed'); };
+        return rect;
+    };
+    deliver(tool, request);
+    assert.equal(temporary.length, 1, 'failed fallback placement removes the temporary rectangle');
+    assert.match(alerts.at(-1), /0件を作成しました。[\s\S]*1件は作成できません/);
+}
+console.log('Passed: nested same-name groups, fallback insertion and rollback on failed move');
+
+{
+    const mask = bounded('mask', [0, 100, 100, 0], {clipping: true});
+    const left = bounded('left', [-40, 80, -20, 20]);
+    const right = bounded('right', [120, 80, 140, 20]);
+    const group = withKids(art('GroupItem', 'inside'), [left, right]);
+    const clipped = withKids(art('GroupItem', 'clipped', {clipped: true}), [group, mask]);
+    const layer = testLayer('output', [clipped]);
+    const document = testDocument('clip.ai', [layer]);
+    const records = recordRectangles(layer), tool = runLayerTool(document);
+    tool.pickLayer(tool.targets.items[0]);
+    assert.equal(tool.previewLayer(), '');
+    const request = creationRequest(tool);
+    deliver(tool, request);
+    assert.equal(records.length, 0);
+    assert.match(alerts.at(-1), /1件は作成できません/);
+    right.visibleBounds = [90, 70, 140, 30];
+    deliver(tool, request);
+    assert.deepEqual(records.map(r => [r.left, r.top, r.width, r.height]), [[90, 70, 10, 40]]);
+}
+console.log('Passed: non-overlapping and partially intersecting art under a rectangular ancestor mask');
+
+{
+    const first = bounded('A', [0, 10, 10, 0]), second = bounded('B', [100, 10, 120, 0]);
+    const layerA = testLayer('output', [first]), layerB = testLayer('output', [second]);
+    const a = testDocument('same.ai', [layerA]), b = testDocument('same.ai', [layerB]);
+    a.fullName = {absoluteURI: '/first/same.ai'}; b.fullName = {absoluteURI: '/second/same.ai'};
+    const inA = recordRectangles(layerA), inB = recordRectangles(layerB);
+    const tool = runLayerTool(a);
+    tool.ctx.app.documents = [a, b];
+    tool.pickLayer(tool.targets.items[0]);
+    const layerPan = messages.at(-1).body;
+    tool.click(rowFor(tool.targets.items[0], first));
+    const artPan = messages.at(-1).body;
+    const request = creationRequest(tool);
+    tool.ctx.app.activeDocument = b;
+    deliver(tool, artPan);
+    deliver(tool, layerPan);
+    deliver(tool, request);
+    assert.equal(b.views[0].centerPoint, undefined);
+    assert.equal(inA.length + inB.length, 0);
+    assert.match(alerts.at(-1), /元のドキュメント/);
+    tool.ctx.app.activeDocument = a;
+    deliver(tool, request);
+    assert.equal(inA.length, 2);
+    assert.equal(inB.length, 0);
+    delete a.fullName; delete b.fullName;
+    const unsaved = runLayerTool(a);
+    unsaved.ctx.app.documents = [a, b];
+    unsaved.pickLayer(unsaved.targets.items[0]);
+    const ambiguous = creationRequest(unsaved);
+    unsaved.ctx.app.activeDocument = b;
+    deliver(unsaved, ambiguous);
+    assert.equal(inB.length, 0, 'ambiguous unsaved names must never authorize a write');
+    unsaved.ctx.app.documents = [b];
+    deliver(unsaved, ambiguous);
+    assert.equal(inB.length, 0, 'closing the original must not make an ambiguous queued request valid');
+}
+console.log('Passed: delayed pan/creation across same-name files and ambiguous unsaved documents');
+
+{
+    const visible = bounded('visible', [0, 10, 10, 0]);
+    const inside = Array.from({length: 3735}, (_, i) => bounded('child ' + i, [0, 10, 10, 0]));
+    const group = withKids(art('GroupItem', 'collapsed'), inside);
+    const layer = testLayer('output', [visible, group]);
+    const tool = runLayerTool(testDocument('large.ai', [layer]));
+    const root = tool.targets.items[0];
+    root.expanded = true;
+    assert.equal(rowFor(root, group).expanded, false);
+    let writes = 0;
+    for (const row of tool.own.filter(c => c._entry)) {
+        let label = row.text;
+        Object.defineProperty(row, 'text', {get() { return label; }, set(value) { writes++; label = value; }});
+    }
+    tool.click(rowFor(root, visible));
+    assert.equal(writes, 2, 'only the leaf and its changed parent toggle need a new label');
+    assert.match(root.items[0].text, /◩/);
+    tool.click(rowFor(root, visible));
+    assert.equal(writes, 4);
+    assert.match(root.items[0].text, /☐/);
+}
+console.log('Passed: one leaf click updates two labels with 3,735 other leaves under a collapsed group');
+
+{
+    const item = bounded('subject', [1, 12, 10, 1]);
+    const group = withKids(art('GroupItem', 'group', {uuid: 'chosen-group'}), []);
+    const layer = testLayer('root', [item, group]);
+    const document = testDocument('palette.ai', [layer], [item, group]);
+    const groupRects = recordRectangles(group);
+    document.getPageItemFromUuid = id => id === group.uuid ? group : null;
+    const tool = runLayerTool(document);
+    Object.defineProperty(tool.ctx.app, 'activeDocument', {configurable: true,
+        get() { throw Error('document unavailable in the palette'); }});
+    tool.click(rowFor(tool.targets.items[0], item));
+    assert(tool.own.some(c => c.text === '1件選択'));
+    assert.equal(item.selected, undefined);
+    const edits = tool.own.filter(c => c.type === 'edittext');
+    ['12', '34', '56', '78'].forEach((value, index) => { edits[index].text = value; });
+    const request = creationRequest(tool, tool.destination.items[0].items[0]);
+    const host = {...tool.ctx, $: {global: {}}, app: {documents: [document], activeDocument: document, coordinateSystem: 0, redraw() {}}};
+    vm.runInNewContext(request, host);
+    assert.equal(groupRects.length, 1);
+    const {fillColor, opacity} = groupRects[0];
+    assert.deepEqual([fillColor.red, fillColor.green, fillColor.blue, opacity], [12, 34, 56, 78]);
+    document.getPageItemFromUuid = () => null;
+    vm.runInNewContext(request, host);
+    assert.equal(groupRects.length, 1);
+    assert.match(alerts.at(-1), /作成先を特定できません/);
+}
+console.log('Passed: transient palette document access and exact UUID group placement with custom appearance');

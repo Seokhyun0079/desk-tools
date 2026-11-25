@@ -18,10 +18,10 @@
         } catch (_) {}
 
         var doc = app.activeDocument;
-        var destinationRefs = [];
+        var originalDocumentKey = null;
         var objectEntries = [];
         var objectRoots = [];
-        var objectRows = [];
+        var pickedCount = 0;
         var picked = {};
         var activeLayerEntry = null;
         var suppressObjectEvent = 0;
